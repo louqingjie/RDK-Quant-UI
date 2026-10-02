@@ -19,7 +19,7 @@ import pytest
 
 from rdkquant.core import images as img
 from rdkquant.core.backends import MockBackend, Workspace, make_backend
-from rdkquant.core.probe import LEVEL_ERROR, probe_host, recommended_shm_bytes
+from rdkquant.core.probe import LEVEL_ERROR, LEVEL_WARN, probe_host, recommended_shm_bytes
 from rdkquant.core.runner import (
     Mount,
     RunSpec,
@@ -306,6 +306,41 @@ def test_ensure_image_short_circuits_when_present(monkeypatch, tmp_path: Path):
 # --------------------------------------------------------------------------
 # 体检 + 后端
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("24.0.7", (24, 0, 7)),
+        ("Docker version 20.10.24, build 5d6db84", (20, 10, 24)),
+        ("19.03", (19, 3)),
+        ("", None),
+        (None, None),
+        ("no digits here", None),
+    ],
+)
+def test_parse_version(text, expected):
+    from rdkquant.core.probe import parse_version
+
+    assert parse_version(text) == expected
+
+
+@pytest.mark.parametrize(
+    "version,target,expected",
+    [
+        ((24, 0, 7), (19, 3), False),
+        ((19, 2), (19, 3), True),
+        ((19, 3), (19, 3), False),
+        ((20,), (19, 3), False),
+        # 关键用例：长度不同时按"补零"比较，(19,) 不该被判成小于 (19, 3)
+        ((19,), (19, 3), True),
+        (None, (19, 3), False),   # 版本未知时不误报
+    ],
+)
+def test_version_lt(version, target, expected):
+    from rdkquant.core.probe import version_lt
+
+    assert version_lt(version, target) is expected
+
+
 def test_probe_host_never_raises_and_reports_something(tmp_path: Path):
     report = probe_host(tmp_path)
     assert report.platform
@@ -321,6 +356,52 @@ def test_probe_host_flags_disk_shortage(tmp_path: Path):
     report = probe_host(tmp_path, required_image_bytes=huge, required_image_name="假镜像")
     assert any(f.code == "DISK_INSUFFICIENT" and f.level == LEVEL_ERROR for f in report.findings)
     assert not report.can_quantize
+
+
+def _stub_docker(monkeypatch, version: str, *, gpu: bool = False):
+    """把 docker / gpu 探测打桩，用来验证版本下限这一层的判断。"""
+    from rdkquant.core import probe as probe_mod
+
+    monkeypatch.setattr(
+        probe_mod, "probe_docker",
+        lambda: probe_mod.DockerStatus("docker", version, True, version),
+    )
+    devices = ("NVIDIA GeForce RTX 4090, 24564 MiB",) if gpu else ()
+    monkeypatch.setattr(
+        probe_mod, "probe_gpu", lambda: probe_mod.GpuStatus("nvidia-smi" if gpu else None, devices)
+    )
+    return probe_mod
+
+
+def test_probe_host_accepts_current_docker(tmp_path, monkeypatch):
+    """docker.io（发行版打包）和 docker-ce（官方）都长这样，都该通过。"""
+    probe_mod = _stub_docker(monkeypatch, "24.0.7")
+    report = probe_mod.probe_host(tmp_path)
+    codes = {f.code for f in report.findings}
+    assert "DOCKER_READY" in codes
+    assert "DOCKER_TOO_OLD" not in codes
+
+
+def test_probe_host_rejects_docker_without_workdir_support(tmp_path, monkeypatch):
+    """--workdir 需要 Docker 17.09+；更旧的版本直接判错，而不是等到跑容器才炸。"""
+    probe_mod = _stub_docker(monkeypatch, "17.6.0")
+    report = probe_mod.probe_host(tmp_path)
+    assert any(f.code == "DOCKER_TOO_OLD" and f.level == LEVEL_ERROR for f in report.findings)
+    assert not report.can_quantize
+
+
+def test_probe_host_warns_when_docker_too_old_for_gpus(tmp_path, monkeypatch):
+    """19.03 之前没有 --gpus：有显卡也用不了 GPU 版镜像，得说清楚。"""
+    probe_mod = _stub_docker(monkeypatch, "19.2.0", gpu=True)
+    report = probe_mod.probe_host(tmp_path)
+    assert any(f.code == "DOCKER_OLD_FOR_GPU" and f.level == LEVEL_WARN for f in report.findings)
+
+
+def test_no_gpu_warning_when_no_gpu_present(tmp_path, monkeypatch):
+    """没显卡就别提 --gpus 了，否则是纯粹的噪音。"""
+    probe_mod = _stub_docker(monkeypatch, "19.2.0", gpu=False)
+    report = probe_mod.probe_host(tmp_path)
+    assert not any(f.code == "DOCKER_OLD_FOR_GPU" for f in report.findings)
 
 
 def test_mock_backend_end_to_end(tmp_path: Path):

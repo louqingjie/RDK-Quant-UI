@@ -131,6 +131,37 @@ class HostReport:
 # --------------------------------------------------------------------------
 _VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
 
+#: `docker run --workdir` 需要 API 1.35，也就是 Docker 17.09+
+DOCKER_MIN_SUPPORTED = (17, 9)
+#: `docker run --gpus` 需要 Docker 19.03+
+DOCKER_MIN_FOR_GPU = (19, 3)
+
+
+def parse_version(text: str | None) -> tuple[int, ...] | None:
+    """把 "24.0.7" 或 "Docker version 20.10.24, build 5d6db84" 解析成 (24, 0, 7)。"""
+    if not text:
+        return None
+    match = _VERSION_RE.search(text)
+    if not match:
+        return None
+    parts: list[int] = []
+    for chunk in match.group(1).split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return None
+    return tuple(parts) or None
+
+
+def version_lt(version: tuple[int, ...] | None, target: tuple[int, ...]) -> bool:
+    """版本比较。先补齐长度再比，否则 (19,) 会被判成小于 (19, 3)。"""
+    if version is None:
+        return False
+    size = max(len(version), len(target))
+    left = version + (0,) * (size - len(version))
+    right = target + (0,) * (size - len(target))
+    return left < right
+
 
 def probe_docker() -> DockerStatus:
     exe = which("docker")
@@ -299,6 +330,31 @@ def probe_host(
                 f"Docker 就绪：客户端 {report.docker.cli_version}，服务端 {report.docker.daemon_version}",
             )
         )
+        # 版本下限：我们只用到 docker load / run / image ls / version，
+        # 这些在发行版的 docker.io 和官方 docker-ce 上行为一致。
+        # 真正需要卡的是 --workdir 和 --gpus 的引入版本。
+        version = parse_version(report.docker.cli_version)
+        if version_lt(version, DOCKER_MIN_SUPPORTED):
+            f.append(
+                Finding(
+                    LEVEL_ERROR,
+                    "DOCKER_TOO_OLD",
+                    f"Docker {report.docker.cli_version} 太旧："
+                    f"容器运行需要 --workdir，要求 {'.'.join(map(str, DOCKER_MIN_SUPPORTED))} 以上",
+                    "Ubuntu 22.04+ 可直接 apt install docker.io；"
+                    "或按 Docker 官方文档装 docker-ce。两者都可以，见 README。",
+                )
+            )
+        elif report.gpu.available and version_lt(version, DOCKER_MIN_FOR_GPU):
+            f.append(
+                Finding(
+                    LEVEL_WARN,
+                    "DOCKER_OLD_FOR_GPU",
+                    f"Docker {report.docker.cli_version}：--gpus 需要 "
+                    f"{'.'.join(map(str, DOCKER_MIN_FOR_GPU))} 以上，用不了 GPU 版镜像",
+                    "改用 CPU 版镜像，或升级 Docker。",
+                )
+            )
 
     # --- WSL（只对 Windows 有意义）---
     if report.is_windows and report.wsl_installed is False:
