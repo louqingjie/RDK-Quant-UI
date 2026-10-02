@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 
 from . import containerops
 from .calib import CalibBuildSpec
@@ -115,7 +115,8 @@ class ToolchainBackend(Protocol):
 
     def scan_calib(
         self, directory: Path, *, shape: str | None = None, dtype: str = "float32",
-        on_line: LineCallback, cancel: threading.Event | None = None,
+        want_stats: bool = False, on_line: LineCallback,
+        cancel: threading.Event | None = None,
     ) -> dict: ...
 
     def build_calib(
@@ -125,7 +126,8 @@ class ToolchainBackend(Protocol):
     ) -> dict: ...
 
     def thumbnails(
-        self, src: Path, out: Path, *, size: int = 96, on_line: LineCallback,
+        self, src: Path, out: Path, *, size: int = 96, count: int = 0,
+        only: Sequence[str] = (), on_line: LineCallback,
         cancel: threading.Event | None = None,
     ) -> dict: ...
 
@@ -202,10 +204,11 @@ class DockerBackend:
         )
 
     def scan_calib(self, directory: Path, *, shape=None, dtype="float32",
-                   on_line: LineCallback, cancel=None) -> dict:
+                   want_stats: bool = False, on_line: LineCallback, cancel=None) -> dict:
         return containerops.probe_calib_scan(
             self.runner, self.workspace, self.workspace.rel(directory),
-            shape=shape, dtype=dtype, on_line=on_line, cancel=cancel,
+            shape=shape, dtype=dtype, want_stats=want_stats,
+            on_line=on_line, cancel=cancel,
         )
 
     def build_calib(self, src: Path, out: Path, spec: CalibBuildSpec, *,
@@ -214,17 +217,17 @@ class DockerBackend:
             self.runner, self.workspace,
             self.workspace.rel(src), self.workspace.rel(out),
             shape=spec.shape, layout=spec.layout, color=spec.color, dtype=spec.dtype,
-            count=spec.count,
+            count=spec.count, only=spec.only,
             mean=spec.mean, scale=spec.scale,
             on_line=on_line, on_progress=on_progress, cancel=cancel,
         )
 
     def thumbnails(self, src: Path, out: Path, *, size: int = 96, count: int = 0,
-                   on_line: LineCallback, cancel=None) -> dict:
+                   only: Sequence[str] = (), on_line: LineCallback, cancel=None) -> dict:
         return containerops.probe_thumbs(
             self.runner, self.workspace,
             self.workspace.rel(src), self.workspace.rel(out),
-            size=size, count=count, on_line=on_line, cancel=cancel,
+            size=size, count=count, only=only, on_line=on_line, cancel=cancel,
         )
 
 
@@ -342,6 +345,8 @@ MOCK_SCAN = {
     },
     "problems": [],
     "warnings": [],
+    # 逐张统计的条数。真实探针**总是**返回它（stats_file 才是按需的）
+    "stats_count": MOCK_CALIB_COUNT,
 }
 
 #: 每个校准样本的字节数：1×3×640×640 float32
@@ -431,7 +436,7 @@ class MockBackend:
         return payload
 
     def scan_calib(self, directory: Path, *, shape=None, dtype="float32",
-                   on_line: LineCallback, cancel=None) -> dict:
+                   want_stats: bool = False, on_line: LineCallback, cancel=None) -> dict:
         self.workspace.ensure()
         on_line(f"$ (mock) probe.py calib-scan {directory.name}")
         entries = (
@@ -449,6 +454,10 @@ class MockBackend:
             return payload
         payload = dict(MOCK_SCAN)
         payload["directory"] = directory.name
+        if want_stats:
+            target = _write_mock_stats(self.workspace)
+            payload["stats_count"] = MOCK_SCAN["count"]
+            payload["stats_file"] = self.workspace.rel(target)
         return payload
 
     def build_calib(self, src: Path, out: Path, spec: CalibBuildSpec, *,
@@ -456,7 +465,8 @@ class MockBackend:
         self.workspace.ensure()
         on_line(f"$ (mock) probe.py calib-build {src.name} {out.name}")
         out.mkdir(parents=True, exist_ok=True)
-        count = spec.count or MOCK_SCAN["count"]
+        # 名单优先于采样（和真实探针一致）
+        count = len(spec.only) if spec.only else (spec.count or MOCK_SCAN["count"])
         per_sample = MOCK_BUILD["bytes_per_sample"]
         written = 0
         for index in range(count):
@@ -481,12 +491,38 @@ class MockBackend:
         return payload
 
     def thumbnails(self, src: Path, out: Path, *, size: int = 96, count: int = 0,
-                   on_line: LineCallback, cancel=None) -> dict:
+                   only: Sequence[str] = (), on_line: LineCallback, cancel=None) -> dict:
         out.mkdir(parents=True, exist_ok=True)
         on_line(f"$ (mock) probe.py thumbs {src.name} {out.name}")
         return {
             "ok": True, "backend": "PIL", "generated": 0, "failed": 0, "files": [],
         }
+
+
+def _write_mock_stats(workspace: Workspace) -> Path:
+    """假后端也写一份逐张统计，让筛选那条界面链路在 Mock 下能走通。
+
+    刻意造出**几种不同的分辨率与长宽比** —— 全一样的假数据没法压出筛选的边界
+    （比例筛选、范围筛选都会变成恒真）。
+    """
+    import json
+
+    target = containerops.stats_path(workspace)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shapes = ((640, 640), (1920, 1080), (1280, 720), (320, 240))
+    files = []
+    for index in range(MOCK_SCAN["count"]):
+        width, height = shapes[index % len(shapes)]
+        files.append({
+            "n": "%04d.jpg" % index,
+            "w": width, "h": height,
+            "s": 40000 + index, "m": "RGB",
+        })
+    target.write_text(
+        json.dumps({"version": 1, "count": len(files), "files": files}),
+        encoding="utf-8",
+    )
+    return target
 
 
 def make_backend(

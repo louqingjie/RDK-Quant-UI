@@ -448,9 +448,10 @@ def _onnx_dtype_name(elem_type):
 
 def cmd_calib_scan(argv):
     if not argv:
-        return fail("用法: probe.py calib-scan <目录> [--shape WxH] [--dtype float32]")
+        return fail("用法: probe.py calib-scan <目录> [--shape WxH] [--dtype float32] "
+                    "[--stats-file 路径]")
     directory = argv[0]
-    shape, dtype = _parse_scan_opts(argv[1:])
+    shape, dtype, stats_file = _parse_scan_opts(argv[1:])
 
     if not os.path.isdir(directory):
         return fail("目录不存在: %s" % directory)
@@ -495,6 +496,10 @@ def cmd_calib_scan(argv):
     resolution_counts = {}
     digests = {}
     duplicates = []
+    #: **逐张统计，不做截断。** payload["files"] 受 MAX_FILE_DETAILS 限制，但筛选
+    #: 需要看到全部图片——实测一个数据集有 3504 张，截断到 500 会让筛选作用于
+    #: 一个偏斜的子集。这些数据本来就算出来了，收集起来是免费的。
+    all_stats = []
 
     for index, (name, full, size) in enumerate(image_like):
         width = height = mode = None
@@ -502,6 +507,10 @@ def cmd_calib_scan(argv):
             width, height, mode = image_size(full, backend)
         key = (width, height)
         resolution_counts[key] = resolution_counts.get(key, 0) + 1
+
+        all_stats.append({
+            "n": name, "w": width, "h": height, "s": size, "m": mode,
+        })
 
         # 内容指纹：大小 + 前 64KB 的 sha1，足够抓重复且很便宜
         try:
@@ -592,11 +601,21 @@ def cmd_calib_scan(argv):
         payload["warnings"].append(
             "目录里是二进制校准数据；没给 --shape 就无法核对字节数")
 
+    # ---- 逐张统计写文件（给宿主机做筛选用）----
+    payload["stats_count"] = len(all_stats)
+    if stats_file:
+        try:
+            write_stats_file(stats_file, all_stats)
+            payload["stats_file"] = stats_file
+        except Exception as exc:
+            # 写不出来不该让整次扫描失败：聚合结果仍然有用，只是筛选用不了。
+            payload["warnings"].append("逐张统计写入失败：%s" % exc)
+
     return finish(payload)
 
 
 def _parse_scan_opts(argv):
-    shape, dtype = None, "float32"
+    shape, dtype, stats_file = None, "float32", None
     i = 0
     while i < len(argv):
         if argv[i] == "--shape" and i + 1 < len(argv):
@@ -605,9 +624,53 @@ def _parse_scan_opts(argv):
         elif argv[i] == "--dtype" and i + 1 < len(argv):
             dtype = argv[i + 1]
             i += 2
+        elif argv[i] == "--stats-file" and i + 1 < len(argv):
+            stats_file = argv[i + 1]
+            i += 2
         else:
             i += 1
-    return shape, dtype
+    return shape, dtype, stats_file
+
+
+def write_stats_file(path, stats):
+    """把逐张统计写成 JSON 文件。
+
+    **为什么走文件而不是塞进回包**：3504 张的 JSON 约 150 KB，作为"最后一行 JSON"
+    会变成一条 150 KB 的日志行，文本框渲染它又慢又没法看。写成文件还便于用户
+    事后核对。键名刻意缩短（n/w/h/s/m）以控制体积。
+    """
+    payload = {"version": 1, "count": len(stats), "files": stats}
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    # 显式 utf-8：别依赖平台默认编码（Windows 上是 GBK）。
+    # ensure_ascii=True 保证内容本来就是纯 ASCII，两边都不会出意外。
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True)
+    return len(stats)
+
+
+def read_name_list(path):
+    """读 `--only-file`：每行一个文件名，`#` 开头与空行忽略。
+
+    用文件而不是 `--only a,b,c`：文件名可能含逗号；几百个名字堆在命令行里没法看；
+    写成文件后用户能核对、能复现。
+    """
+    if not path:
+        return None
+    if not os.path.isfile(path):
+        return None
+    names = []
+    # ⚠️ **必须显式指定 utf-8。** 宿主写名单时用的是 utf-8，而 `open()` 默认用
+    # 平台编码 —— Windows 上是 GBK，遇到中文注释直接 UnicodeDecodeError（实测踩过）。
+    # errors="replace" 是兜底：真碰上坏字节时，那些名字会变成替换字符、匹配不上，
+    # 于是以 missing 的形式被报出来，而不是让整次生成崩掉。
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            name = line.strip()
+            if name and not name.startswith("#"):
+                names.append(name)
+    return names
 
 
 def _parse_shape(text):
@@ -714,7 +777,19 @@ def cmd_calib_build(argv):
         return fail("源目录里没有可识别的图片")
 
     available = len(files)
-    files = sample_evenly(files, opts["count"])
+    # `--only-file` 优先于 `--count`：给了名单就按名单来，不再采样。
+    # 名单来自宿主机的筛选 + 手动勾选，是用户明确的意图。
+    only = read_name_list(opts["only_file"])
+    missing = []
+    if only:
+        known = set(files)
+        wanted = set(only)
+        files = [name for name in files if name in wanted]
+        missing = [name for name in only if name not in known]
+        if not files:
+            return fail("--only-file 里指定的文件一个都不在源目录里")
+    else:
+        files = sample_evenly(files, opts["count"])
 
     if not os.path.isdir(out):
         os.makedirs(out)
@@ -771,6 +846,9 @@ def cmd_calib_build(argv):
         # 采样信息：让界面能说清"从 3504 张里取了 50 张"
         "available": available,
         "sampled": len(files),
+        # 名单里有、但源目录里找不到的名字（被跳过的）
+        "missing": missing[:20],
+        "missing_count": len(missing),
     }
     if mismatched:
         payload["ok"] = False
@@ -785,12 +863,16 @@ def _parse_build_opts(argv):
     opts = {
         "shape": None, "layout": "NHWC", "color": "bgr",
         "dtype": "float32", "mean": None, "scale": None, "count": 0,
+        "only_file": None,
     }
     i = 0
     while i < len(argv):
         key = argv[i]
         value = argv[i + 1] if i + 1 < len(argv) else None
-        if key == "--shape":
+        if key == "--only-file":
+            opts["only_file"] = value
+            i += 2
+        elif key == "--shape":
             opts["shape"] = _parse_shape(value)
             i += 2
         elif key == "--count":
@@ -833,12 +915,15 @@ def _parse_floats(text):
 
 def cmd_thumbs(argv):
     """用法: probe.py thumbs <源目录> <输出目录> [--size 96] [--count N]
+             [--only-file 名单]
 
-    `--count N` 与 `calib-build` 用**同一套均匀采样**，所以看到的缩略图就是
+    预览必须和实际产物一致，所以这里与 `calib-build` **共用同一套选取逻辑**：
+    给了 `--only-file` 就按名单，否则按 `--count` 均匀采样。看到的缩略图就是
     实际会用来生成校准数据的那几张。
     """
     if len(argv) < 2:
-        return fail("用法: probe.py thumbs <源目录> <输出目录> [--size 96] [--count N]")
+        return fail("用法: probe.py thumbs <源目录> <输出目录> [--size 96] "
+                    "[--count N] [--only-file 名单]")
     src, out = argv[0], argv[1]
     size = 96
     count = 0
@@ -854,6 +939,11 @@ def cmd_thumbs(argv):
                     size = value
                 else:
                     count = value
+    only_file = None
+    if "--only-file" in argv:
+        idx = argv.index("--only-file")
+        if idx + 1 < len(argv):
+            only_file = argv[idx + 1]
 
     backend = detect_imaging()
     if backend is None:
@@ -864,8 +954,14 @@ def cmd_thumbs(argv):
 
     made = []
     failures = []
-    # 和 calib-build 同一套采样 —— 看到的缩略图就是实际会用的那几张
-    names = sample_evenly(_image_files(src), count)
+    # 和 calib-build 同一套选取逻辑 —— 看到的缩略图就是实际会用的那几张
+    candidates = _image_files(src)
+    only = read_name_list(only_file)
+    if only:
+        wanted = set(only)
+        names = [name for name in candidates if name in wanted]
+    else:
+        names = sample_evenly(candidates, count)
     if backend == "PIL":
         from PIL import Image
 

@@ -36,6 +36,9 @@ SCAN_CONTRACT = {
     "ok", "directory", "imaging_backend", "count", "image_like", "binary_like",
     "measured", "files", "resolutions", "duplicates", "exposure",
     "problems", "warnings",
+    # 逐张统计的条数。**总是**返回（stats_file 才是按需的）——
+    # 宿主机靠它判断"筛选用不筛得了"
+    "stats_count",
 }
 BUILD_CONTRACT = {
     "ok", "backend", "written", "failed", "failures", "bytes",

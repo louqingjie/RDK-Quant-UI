@@ -26,6 +26,11 @@ PROBE_FILE_NAME = "probe.py"
 #: 工作区挂载为 /workspace，所以探针在容器里的固定路径就是这个
 PROBE_CONTAINER_PATH = "/workspace/%s/%s" % (PROBE_DIR_NAME, PROBE_FILE_NAME)
 
+#: 逐张统计（calib-scan --stats-file 写、宿主读来做筛选）
+STATS_FILE_NAME = "calib-stats.json"
+#: 校准集名单（宿主写、探针 --only-file 读）
+SELECTION_FILE_NAME = "selection.txt"
+
 #: 往回找 JSON 时最多看多少行（容忍探针之后可能出现的少量尾部输出）
 _TAIL_SCAN = 20
 
@@ -167,15 +172,41 @@ def probe_inputs(runner, workspace, onnx_path: str, **kw) -> dict:
     return run_probe(runner, workspace, ["inputs", onnx_path], **kw)
 
 
+def write_selection(workspace: Any, names: Sequence[str]) -> Path:
+    """把选中的文件名写成一份名单，供容器侧 `--only-file` 读取。
+
+    用**文件**而不是 `--only a,b,c`：文件名可能含逗号；几百个名字堆在命令行里
+    没法看；写成文件后用户还能自己去核对、去复现。
+
+    写在 `<ws>/.rdkquant/` 下 —— 探针本身就放在那里（`ensure_probe`），
+    工作区又已经挂载为 `/workspace`，不需要任何新的挂载约定。
+    """
+    directory = workspace.root / PROBE_DIR_NAME
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / SELECTION_FILE_NAME
+    lines = ["# 校准集名单：每行一个文件名，由界面生成", *names]
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def stats_path(workspace: Any) -> Path:
+    """逐张统计文件的**宿主侧**路径。"""
+    return workspace.root / PROBE_DIR_NAME / STATS_FILE_NAME
+
+
 def probe_calib_scan(
     runner, workspace, directory: str, *, shape: str | None = None,
-    dtype: str = "float32", **kw
+    dtype: str = "float32", want_stats: bool = False, **kw
 ) -> dict:
     argv = ["calib-scan", directory]
     if shape:
         argv += ["--shape", shape]
     if dtype:
         argv += ["--dtype", dtype]
+    if want_stats:
+        # 让探针把逐张统计写到工作区里。走文件而不是回包：3504 条约 150 KB，
+        # 作为"最后一行 JSON"会变成一条 150 KB 的日志行，文本框渲染不动。
+        argv += ["--stats-file", workspace.rel(stats_path(workspace))]
     return run_probe(runner, workspace, argv, **kw)
 
 
@@ -183,6 +214,7 @@ def probe_calib_build(
     runner, workspace, src: str, out: str, *,
     shape: str, layout: str, color: str, dtype: str,
     count: int = 0,
+    only: Sequence[str] = (),
     mean: Sequence[float] | None = None,
     scale: Sequence[float] | None = None,
     **kw
@@ -191,7 +223,10 @@ def probe_calib_build(
         "calib-build", src, out,
         "--shape", shape, "--layout", layout, "--color", color, "--dtype", dtype,
     ]
-    if count:
+    if only:
+        # 名单优先于采样：它是用户明确的意图，而 count 只是起点
+        argv += ["--only-file", workspace.rel(write_selection(workspace, only))]
+    elif count:
         argv += ["--count", str(int(count))]
     if mean:
         argv += ["--mean", " ".join(str(v) for v in mean)]
@@ -201,10 +236,12 @@ def probe_calib_build(
 
 
 def probe_thumbs(runner, workspace, src: str, out: str, *, size: int = 96,
-                 count: int = 0, **kw) -> dict:
+                 count: int = 0, only: Sequence[str] = (), **kw) -> dict:
     argv = ["thumbs", src, out, "--size", str(size)]
-    if count:
-        # 和 calib-build 同一套采样 —— 看到的就是会用到的那几张
+    if only:
+        # 与 calib-build 共用同一份名单 —— 预览里看到的就是实际会用到的那几张
+        argv += ["--only-file", workspace.rel(write_selection(workspace, only))]
+    elif count:
         argv += ["--count", str(int(count))]
     return run_probe(runner, workspace, argv, **kw)
 

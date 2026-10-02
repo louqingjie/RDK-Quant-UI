@@ -44,6 +44,9 @@ class CalibBuildSpec:
     #: 从源目录里**均匀采样**多少张；0 表示全部用上。
     #: 官方建议校准集 20~100 张，而实际数据集动辄几千张，采样是必须的。
     count: int = 0
+    #: 明确指定要用哪些文件（筛选手动勾选的结果）。**非空时优先于 `count`** ——
+    #: 那是用户明确的意图，而 count 只是自动起点。
+    only: tuple[str, ...] = ()
 
     @property
     def output_dir_name(self) -> str:
