@@ -1,0 +1,11 @@
+# 目标平台是 Linux（量化在 OpenExplorer 容器里跑），统一用 LF。
+# 不加这条的话，Windows 上的 core.autocrlf 会把 .py / .yaml 检出成 CRLF，
+# 挂进容器后 shell 脚本会直接报 "$'\r': command not found"。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.tar.gz binary
+*.whl binary
