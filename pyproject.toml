@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdkquant"
+version = "0.1.0"
+description = "RDK X3/X5 模型量化工具：Docker 内置量化环境 + 宿主机原生桌面 UI"
+requires-python = ">=3.10,<3.15"
+# 本项目以 GPLv3 开源发布。依赖的许可证兼容性已核对：
+#   PySide6 (LGPL-3)、onnx (Apache-2.0)、PyYAML (MIT) —— 均与 GPLv3 兼容。
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+# 说明：到目前为止 core 是**纯标准库**实现（urllib / subprocess / ctypes），
+# 刻意不引入 requests、psutil。onnx 与 PyYAML 会在配置与模型内省模块落地时加入。
+dependencies = []
+
+[project.optional-dependencies]
+# UI 独立成 extra：core 要能在 OE 容器（Ubuntu 20.04 / Python 3.8）里装而不拉进 Qt。
+# 刻意保持只有 PySide6 —— 不引入 qfluentwidgets / superqt / BreezeStyleSheets，
+# 观感靠"平台调色板 + 排版纪律"实现，而不是靠皮肤。
+ui = ["PySide6>=6.7"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+rdkquant = "rdkquant.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rdkquant = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

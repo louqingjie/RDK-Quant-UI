@@ -1,0 +1,19 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# --- 本项目的运行产物，不要提交 ---
+runs/
+shots/
+ui_*.png
+*.log
+
+# --- 离线镜像包（1.7~10 GB，只在用户缓存目录里，仓库内永不出现）---
+*.tar.gz
