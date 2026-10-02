@@ -73,6 +73,27 @@ def shell(qapp, monkeypatch, tmp_path: Path):
     # Windows 上堆损坏（0xC0000374），进程崩在退出那刻、pytest 汇总行都打不出来。
     window.close()
 
+    # **必须清掉图标缓存**，否则同一进程里建第二个壳会在 gc 回收它时段错误。
+    #
+    # 定位过程：反复 建壳 → show → close → del → gc.collect()，第一个壳回收正常，
+    # 第二个壳回收时崩在 "Garbage-collecting"。三个对照变体里只有一项能消除它——
+    # 每轮之后 clear_cache()。而 icons.py 的 docstring 早就写了"测试里重建 app 前
+    # 要清一次"，只是从来没人真的清过。
+    #
+    # 代价：每次都要重渲染 SVG，整个测试套件从约 60 秒变成约 170 秒。
+    # **产品不受影响**——一个进程只建一个 AppShell，缓存正常发挥作用。
+    icons.clear_cache()
+
+    # 还要真的把窗口销毁掉。close() 只是关掉窗口、**对象还活着**，而下一个用例里
+    # apply_theme() 会对 QApplication 重设样式表，Qt 于是重新 polish 所有顶层控件
+    # ——包括这些关掉但没销毁的旧窗口，攒够几十个就踩到失效指针：
+    #     Windows fatal exception: access violation
+    #       File "src/rdkquant/ui/palette.py", line 193 in apply_theme
+    #       File "tests/test_ui_smoke.py", line 64 in shell
+    # deleteLater 只是排队，要等事件循环转一圈才真的删。
+    window.deleteLater()
+    qapp.processEvents()
+
 
 # --------------------------------------------------------------------------
 # 度量与主题
