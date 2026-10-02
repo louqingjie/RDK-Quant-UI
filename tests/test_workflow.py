@@ -266,13 +266,17 @@ def test_perf_blocked_without_bin():
 
 
 def test_perf_sim_only_is_done_with_warning():
+    """板端实测已按计划暂缓：状态算"完成"，但必须诚实说明只有静态分析，
+    而不是留一句让用户以为"自己还没做"的提示。"""
     ctx = RunContext(artifacts={ARTIFACT_BIN: Path("m.bin")}, perf_sim=Path("perf"))
     status = status_of(ctx, Stage.PERF)
     assert status.state is StageState.DONE
-    assert any("上板" in w for w in status.warnings)
+    assert any("暂缓" in w for w in status.warnings)
 
 
 def test_perf_board_removes_warning():
+    """即使暂缓实现，数据模型仍然接受"已上板"这个事实——
+    将来把功能接回来不需要动门禁逻辑。"""
     ctx = RunContext(
         artifacts={ARTIFACT_BIN: Path("m.bin")},
         perf_sim=Path("perf"),

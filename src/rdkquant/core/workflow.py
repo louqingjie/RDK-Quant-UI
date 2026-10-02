@@ -326,7 +326,10 @@ def _perf_status(ctx: RunContext) -> StageStatus:
         return StageStatus(
             Stage.PERF,
             StageState.DONE,
-            warnings=["只做了 hb_perf 静态分析，还没上板实测。"],
+            warnings=[
+                "板端实测（hrt_model_exec perf）功能已按计划暂缓，当前只有 hb_perf "
+                "静态分析；它不含 CPU 部分耗时，真实瓶颈仍需自行上板确认。"
+            ],
         )
     return StageStatus(
         Stage.PERF,
