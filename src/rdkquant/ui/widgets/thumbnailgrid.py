@@ -44,12 +44,12 @@ class ThumbnailGrid(QListView):
 
     def clear(self) -> None:
         self._model.clear()
+        self._sync_height()
 
     def set_images(self, directory: Path, names: list[str] | None = None) -> int:
         """把目录（或指定文件名）下的图片装进网格，返回实际装了几个。"""
         self.clear()
         if not directory.is_dir():
-            self.setMinimumHeight(160)
             return 0
         candidates = sorted(
             p for p in directory.iterdir()
@@ -60,12 +60,33 @@ class ThumbnailGrid(QListView):
             candidates = [p for p in candidates if p.name in wanted]
         candidates = candidates[:MAX_TILES]
 
-        columns = 6
-        for index, path in enumerate(candidates):
+        # ⚠️ **全部放在第 0 列。**
+        # QListView 在 IconMode 下是"一维流式"布局，**只读模型的第 0 列** ——
+        # 之前用 setItem(row, col) 铺了 6 列，结果只有每行第 0 个能被画出来：
+        # 50 张只显示了 9 张（50÷6 向上取整），界面上就成了一排。
+        # 换行交给视图自己按宽度做。
+        for path in candidates:
             item = QStandardItem(QIcon(str(path)), path.name)
             item.setToolTip(str(path))
             item.setEditable(False)
-            self._model.setItem(index // columns, index % columns, item)
-        rows = max(1, (len(candidates) + columns - 1) // columns)
-        self.setMinimumHeight(min(rows, 4) * 132 + 12)
+            self._model.appendRow(item)
+        self._sync_height()
         return len(candidates)
+
+    def _sync_height(self) -> None:
+        """按"每行能放几个"算出需要多高。
+
+        高度必须自己算：外层是滚动区，视图给不出合适的 sizeHint，
+        不算的话要么只露一行、要么留一大片空白。
+        """
+        grid = self.gridSize()
+        per_row = max(1, self.viewport().width() // max(1, grid.width()))
+        count = self._model.rowCount()
+        rows = max(1, (count + per_row - 1) // per_row)
+        wanted = rows * grid.height() + 12
+        if self.minimumHeight() != wanted:
+            self.setMinimumHeight(wanted)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_height()
