@@ -18,7 +18,41 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 #: 控制台输出带 ANSI 颜色（日志文件里没有）。不剥掉的话 `\x1b[92mINFO\x1b[0m` 会污染解析。
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+#: 也覆盖 `\x1b[?25l` 这类私有模式和 OSC 标题序列——容器里的工具什么都可能打。
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+#: 工具链用 ANSI 颜色标级别。**这是工具自己给的结论，比按文字猜可靠**，
+#: 所以优先用它。映射按 hb_mapper 的实际输出实测：`\x1b[92mINFO\x1b[0m`、
+#: `\x1b[91mERROR\x1b[0m`、`\x1b[93mWARNING\x1b[0m`。
+_ANSI_LEVEL = {
+    "91": "error", "31": "error",
+    "93": "warn", "33": "warn",
+    "92": "info", "32": "success",
+    "96": "debug", "36": "debug",
+}
+
+
+def strip_ansi(text: str) -> str:
+    """去掉 ANSI 转义序列。显示与解析之前都该过一遍。"""
+    return _ANSI_RE.sub("", str(text))
+
+
+def ansi_level(text: str) -> str | None:
+    """从 ANSI 颜色码推级别，返回 `error` / `warn` / `info` / `success` / `debug`。
+
+    取**第一个**颜色码：工具的习惯是先给级别上色，后面的颜色是给正文里的强调用的。
+    没有颜色码时返回 None（交给文字标记那条路判断）。
+    """
+    match = _ANSI_RE.search(str(text))
+    if not match:
+        return None
+    sequence = match.group(0)
+    codes = re.findall(r"\d+", sequence)
+    for code in codes:
+        level = _ANSI_LEVEL.get(code)
+        if level:
+            return level
+    return None
 
 #: 真实前缀带毫秒时间戳：`2026-10-02 19:41:44,845 ...`
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}[,.]\d+\s+")
@@ -155,6 +189,19 @@ class CheckerReport:
     @property
     def cpu_count(self) -> int:
         return sum(1 for node in self.nodes if node.on_cpu)
+
+
+def strip_timestamp_prefix(line: str) -> str:
+    """只剥掉 ANSI、时间戳与来源信息，**保留级别标记**。
+
+    和 `strip_log_prefix` 的区别很关键：后者连 `[INFO]` 一起剥掉（解析表格时不需要
+    级别），而判断日志级别时**正需要那个标记**。混用会让 `[INFO] xxx` 被判成普通行
+    ——实测踩过。
+    """
+    text = _ANSI_RE.sub("", str(line).rstrip("\r\n"))
+    text = _TIMESTAMP_RE.sub("", text, count=1)
+    text = _FILE_PREFIX_RE.sub("", text, count=1)
+    return text.lstrip()
 
 
 def parse_checker(lines: Iterable[str]) -> CheckerReport | None:

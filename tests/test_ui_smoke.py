@@ -625,3 +625,72 @@ def test_check_failure_is_not_reported_as_a_format_problem(shell, tmp_path: Path
     assert "255" in text
     assert "格式" not in text, "rc≠0 不是格式问题，别把用户引向解析器"
     assert "ERROR" in text
+
+
+# --------------------------------------------------------------------------
+# 日志渲染：ANSI 不能显示成字面量，而且要拿来判断级别
+# --------------------------------------------------------------------------
+REAL_INFO_LINE = (
+    "2026-10-02 20:57:55,451 \x1b[92mINFO\x1b[0m Start to optimize the onnx model."
+)
+REAL_ERROR_LINE = (
+    "2026-10-02 20:57:55,805 \x1b[91mERROR\x1b[0m "
+    "*** ERROR-OCCUR-DURING {horizon_nn.build_onnx} ***"
+)
+
+
+def test_log_line_never_shows_raw_ansi(shell):
+    """用户看到的是 `[92mINFO[0m` 这种字面量——ESC 字节不可见，剩下的就露出来了。"""
+    view = shell.log_panel.log
+    view.clear_log()
+    view.append_line(REAL_INFO_LINE)
+
+    shown = view.toPlainText()
+    assert "\x1b" not in shown
+    assert "[92m" not in shown
+    assert "[0m" not in shown
+    assert shown.startswith("2026-10-02 20:57:55,451 INFO ")
+
+
+def test_exported_log_is_clean_too(shell, tmp_path: Path):
+    view = shell.log_panel.log
+    view.clear_log()
+    view.append_lines([REAL_INFO_LINE, REAL_ERROR_LINE])
+    target = view.save_to(tmp_path / "export.log")
+    content = target.read_text(encoding="utf-8")
+    assert "\x1b" not in content and "[92m" not in content
+
+
+def test_log_level_comes_from_the_tools_own_colour(shell):
+    """真实输出是 `时间戳 \\x1b[92mINFO\\x1b[0m …`。
+
+    原来的 classify 只在**行首**找 `[INFO]`，时间戳挡在前面，于是每一行都被判成
+    普通级——日志一片灰。颜色码才是可靠信号。
+    """
+    from rdkquant.ui.widgets.logview import LogLevel, classify
+
+    assert classify(REAL_INFO_LINE) is LogLevel.INFO
+    assert classify(REAL_ERROR_LINE) is LogLevel.ERROR
+    assert classify("\x1b[93mWARNING\x1b[0m x") is LogLevel.WARN
+
+
+def test_log_colours_differ_between_info_and_error(shell):
+    """级别不能只是分类对了，颜色也得真的不一样。"""
+    view = shell.log_panel.log
+    view.clear_log()
+    view.append_lines([REAL_INFO_LINE, REAL_ERROR_LINE])
+
+    from rdkquant.ui.widgets.logview import LogLevel
+
+    info_color = view._format_for(LogLevel.INFO).foreground().color()
+    error_color = view._format_for(LogLevel.ERROR).foreground().color()
+    assert info_color != error_color
+
+
+def test_carriage_return_progress_does_not_pile_up(shell):
+    """进度条靠 `\\r` 覆盖同一行，原样插进去会堆出一长串中间态。"""
+    from rdkquant.ui.widgets.logview import clean_for_display
+
+    assert clean_for_display("  0%|          | 0/1\r 50%|#####     |\r100%|##########|") \
+        == "100%|##########|"
+    assert clean_for_display("普通行") == "普通行"

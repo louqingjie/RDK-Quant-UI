@@ -17,9 +17,17 @@ import pytest
 
 from rdkquant.core.logparse import (
     CheckerNode,
+    ansi_level,
     parse_checker,
+    strip_ansi,
     strip_log_prefix,
 )
+
+# 用户日志里的真实字符串（hb_mapper 的控制台输出）
+REAL_INFO = "2026-10-02 20:57:55,451 \x1b[92mINFO\x1b[0m Start to optimize the onnx model."
+REAL_ERROR = ("2026-10-02 20:57:55,805 \x1b[91mERROR\x1b[0m "
+              "*** ERROR-OCCUR-DURING {horizon_nn.build_onnx} ***")
+REAL_WARN = "2026-10-02 20:57:55,805 \x1b[93mWARNING\x1b[0m something is off"
 
 # 与 core/backends.py 里 MockBackend 的输出同构
 MOCK_CHECKER = """\
@@ -60,6 +68,47 @@ def test_strip_log_prefix_handles_console_ansi():
     """控制台输出带 ANSI 颜色，日志文件里没有。不剥掉会污染解析。"""
     line = "2026-10-02 19:41:44,543 \x1b[92mINFO\x1b[0m Start hb_mapper...."
     assert strip_log_prefix(line) == "Start hb_mapper...."
+
+
+# --------------------------------------------------------------------------
+# ANSI：剥掉 + 当级别用
+# --------------------------------------------------------------------------
+def test_strip_ansi_removes_colour_codes():
+    assert strip_ansi(REAL_INFO) == (
+        "2026-10-02 20:57:55,451 INFO Start to optimize the onnx model."
+    )
+    assert "\x1b" not in strip_ansi(REAL_ERROR)
+    assert "[92m" not in strip_ansi(REAL_INFO)
+
+
+@pytest.mark.parametrize("line,expected", [
+    (REAL_INFO, "info"),
+    (REAL_ERROR, "error"),
+    (REAL_WARN, "warn"),
+    ("\x1b[96mDEBUG\x1b[0m x", "debug"),
+    ("\x1b[31mred\x1b[0m", "error"),
+    ("\x1b[33myellow\x1b[0m", "warn"),
+    ("\x1b[32mgreen\x1b[0m", "success"),
+])
+def test_ansi_level_reads_the_tools_own_colour(line, expected):
+    """颜色是**工具自己给的结论**，比按文字猜可靠，所以要能读出来。"""
+    assert ansi_level(line) == expected
+
+
+@pytest.mark.parametrize("line", [
+    "2026-10-02 20:57:55,451 INFO 没有颜色码",
+    "纯文本",
+    "",
+    "\x1b[0m只有重置码",
+])
+def test_ansi_level_returns_none_without_a_colour(line):
+    assert ansi_level(line) is None
+
+
+def test_ansi_handles_private_modes_and_cursor_moves():
+    """容器里的工具会打 `\\x1b[?25l` 这类私有模式，别漏了。"""
+    assert strip_ansi("\x1b[?25l进度\x1b[?25h") == "进度"
+    assert strip_ansi("a\x1b[2Kb") == "ab"
 
 
 # --------------------------------------------------------------------------

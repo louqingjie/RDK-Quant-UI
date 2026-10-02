@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from ..metrics import mono_font
 from ..palette import semantic_colors
+from ...core.logparse import ansi_level, strip_ansi, strip_timestamp_prefix
 
 DEFAULT_MAX_BLOCKS = 20000
 
@@ -44,12 +45,27 @@ _ALIASES = {
 
 
 def classify(line: str) -> LogLevel:
-    """从行首的 `[INFO]` / `[WARN]` 这类标记判断等级。
+    """判断日志等级。
 
-    hb_mapper 的日志格式在不同工具链版本之间会漂移，所以只认行首标记，
+    **优先用工具自己标的 ANSI 颜色。** 颜色是工具给出的结论，比我们按文字猜可靠：
+    hb_mapper 打的是 `\\x1b[92mINFO\\x1b[0m` / `\\x1b[91mERROR\\x1b[0m`。
+    之前完全没用这个信息，还把颜色码当垃圾显示出来（用户看到的是 `[92mINFO[0m`）。
+
+    退路才是行首标记，而且必须先剥掉时间戳前缀：真实输出形如
+    `2026-10-02 20:57:55,451 INFO ...`，在行首直接匹配 `INFO` 永远匹配不上——
+    实测的后果是所有行都被判成普通级，日志一片灰。
+
     认不出就当普通行——**绝不因为格式变了就报错**。
     """
-    match = _LEVEL_RE.match(line)
+    hint = ansi_level(line)
+    if hint:
+        try:
+            return LogLevel(hint)
+        except ValueError:
+            pass
+
+    text = strip_timestamp_prefix(line)
+    match = _LEVEL_RE.match(text)
     if not match:
         return LogLevel.PLAIN
     token = match.group(1).lower()
@@ -59,6 +75,21 @@ def classify(line: str) -> LogLevel:
         return LogLevel(token)
     except ValueError:
         return LogLevel.PLAIN
+
+
+def clean_for_display(line: str) -> str:
+    """把一行变成"终端上看起来的样子"。
+
+    除了剥 ANSI，还要处理回车：容器里的进度条靠 `\\r` 反复覆盖同一行，
+    原样插进文本框会在日志里堆出一长串中间态（`  0%|   ... 50%|   ... 100%|`）。
+    终端上用户只看得到最后一段，这里也照做。
+    """
+    text = strip_ansi(str(line)).rstrip("\n")
+    if "\r" in text:
+        segments = [part for part in text.split("\r") if part.strip()]
+        if segments:
+            text = segments[-1]
+    return text.rstrip()
 
 
 class LogView(QPlainTextEdit):
@@ -81,9 +112,11 @@ class LogView(QPlainTextEdit):
         self._auto_scroll = bool(enabled)
 
     def append_line(self, line: str) -> None:
+        # 等级用**原始行**判断（ANSI 颜色在里面），显示和存档用剥干净的文本。
         level = classify(line)
-        self._entries.append((level, line))
-        self._write(level, line)
+        text = clean_for_display(line)
+        self._entries.append((level, text))
+        self._write(level, text)
         if self._auto_scroll:
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
