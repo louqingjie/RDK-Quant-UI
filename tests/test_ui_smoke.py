@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 
 from rdkquant.core.probe import (
     LEVEL_ERROR,
@@ -67,31 +68,34 @@ def shell(qapp, monkeypatch, tmp_path: Path):
     qapp.processEvents()
     yield window
 
-    # 只调 close() 就够——AppShell.closeEvent 会等所有 TaskRunner 收尾。
+    # 关窗前等所有 TaskRunner 收尾 —— AppShell.closeEvent 负责。
     # 保留这条注释是因为**这里曾经坏过**：closeEvent 只等了 env_page.tasks，
     # 三个步骤页各自的 runner 全漏了，导致 QThread 还活着时宿主对象被回收，
     # Windows 上堆损坏（0xC0000374），进程崩在退出那刻、pytest 汇总行都打不出来。
     window.close()
 
-    # **必须清掉图标缓存**，否则同一进程里建第二个壳会在 gc 回收它时段错误。
+    # ⚠️ **必须强制投递 DeferredDelete，否则窗口根本不会被销毁。**
     #
-    # 定位过程：反复 建壳 → show → close → del → gc.collect()，第一个壳回收正常，
-    # 第二个壳回收时崩在 "Garbage-collecting"。三个对照变体里只有一项能消除它——
-    # 每轮之后 clear_cache()。而 icons.py 的 docstring 早就写了"测试里重建 app 前
-    # 要清一次"，只是从来没人真的清过。
+    # `deleteLater()` 只是把删除**排队**；而普通的 `processEvents()` **不处理
+    # DeferredDelete 事件**，那个队列永远不会被执行。于是每个用例都留下一个完整的
+    # 控件树，`app.topLevelWidgets()` 一轮涨 4 个、从不回落。
     #
-    # 代价：每次都要重渲染 SVG，整个测试套件从约 60 秒变成约 170 秒。
-    # **产品不受影响**——一个进程只建一个 AppShell，缓存正常发挥作用。
-    icons.clear_cache()
-
-    # 还要真的把窗口销毁掉。close() 只是关掉窗口、**对象还活着**，而下一个用例里
-    # apply_theme() 会对 QApplication 重设样式表，Qt 于是重新 polish 所有顶层控件
-    # ——包括这些关掉但没销毁的旧窗口，攒够几十个就踩到失效指针：
-    #     Windows fatal exception: access violation
-    #       File "src/rdkquant/ui/palette.py", line 193 in apply_theme
-    #       File "tests/test_ui_smoke.py", line 64 in shell
-    # deleteLater 只是排队，要等事件循环转一圈才真的删。
+    # 后果不只是内存：每次 `apply_theme()` 里的 `setStyleSheet()` 都要重新 polish
+    # **所有**顶层控件，于是耗时随用例数线性增长。实测同一个进程里连续建壳：
+    #
+    #     第 1 轮  apply_theme     2.2 ms   顶层控件 4
+    #     第 2 轮  apply_theme   376.0 ms   顶层控件 8
+    #     第 4 轮  apply_theme  1182.5 ms   顶层控件 16      ← 增长 589 倍
+    #
+    # 三种销毁方式的对照（判据：apply_theme 耗时是否保持平稳）：
+    #     close + deleteLater + processEvents()       增长 589x  ❌
+    #     + sendPostedEvents(DeferredDelete)          增长 0.0x  ✅
+    #     shiboken6.delete() 立即销毁                   增长 1.1x  ✅
+    #
+    # 整条测试链路的慢、以及之前那几次"跑完全部用例却崩在退出/取样式表时"，根子都在
+    # 这里。之前用 `icons.clear_cache()` 压住的段错误，也只是这个累积的另一个症状。
     window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.processEvents()
 
 
