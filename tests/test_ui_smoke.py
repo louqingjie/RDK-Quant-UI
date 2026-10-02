@@ -567,8 +567,66 @@ def test_model_page_runs_fit_columns_after_data(shell):
 
 
 # --------------------------------------------------------------------------
-# Ctrl+C
+# 交替行配色
 # --------------------------------------------------------------------------
+def test_findings_table_alternate_rows_are_not_white(shell):
+    """回归测试：暗色主题下交替行曾经是白底，文字是浅色 → 整行看起来是空的。
+
+    根因有两层，都不是"颜色写错了"：
+      1. Qt 的 item delegate 在 alternatingRowColors 打开时，用**调色板的
+         AlternateBase** 作为行背景 brush，它优先于 QSS 的 alternate-background-color
+      2. app.setStyleSheet() 会让 QStyleSheetStyle 按**样式自带的标准调色板**重算每个
+         控件的调色板，而 AlternateBase 不在 QSS 的映射范围里 → 退回成白色
+
+    也实测过"重新设一遍 app 调色板"没用——那是按控件算的。修法见 widgets/TableView。
+
+    判据直接取渲染出来的像素亮度：**暗色主题下不该出现亮色行**。
+    """
+    view = shell.env_page.findings_view
+    model = shell.env_page.findings_model
+    rows = model.rowCount()
+    assert rows >= 2, f"至少要两行才谈得上交替，实际 {rows}"
+
+    image = view.grab().toImage()
+    header = view.horizontalHeader().height()
+    row_h = max(1, (image.height() - header) // rows)
+
+    lums = []
+    for r in range(rows):
+        y = min(header + r * row_h + row_h // 2, image.height() - 2)
+        lums.append(image.pixelColor(300, y).lightness())
+
+    assert max(lums) < 128, (
+        f"暗色主题下出现了亮色行 {lums} —— 浅色文字落在白底上就看不见了"
+    )
+    assert max(lums) - min(lums) < 40, (
+        f"交替行与普通行的亮度差过大 {lums} —— 条纹应该只是细微区别"
+    )
+
+
+def test_alternate_base_survives_a_theme_round_trip(shell):
+    """主题切回来之后必须还是对的。
+
+    QStyleSheetStyle 在每次应用样式表时都会重算控件调色板，所以 TableView 里
+    有一个 changeEvent(PaletteChange) 的自愈钩子。没有它的话，切一次主题就退回白色。
+    """
+    view = shell.env_page.findings_view
+
+    def alternate_lum():
+        image = view.grab().toImage()
+        header = view.horizontalHeader().height()
+        rows = shell.env_page.findings_model.rowCount()
+        row_h = max(1, (image.height() - header) // max(1, rows))
+        return image.pixelColor(
+            300, min(header + row_h + row_h // 2, image.height() - 2)
+        ).lightness()
+
+    shell.set_theme(ThemeMode.LIGHT)
+    shell.set_theme(ThemeMode.DARK)
+    shell.set_theme(ThemeMode.SYSTEM)
+    shell.set_theme(ThemeMode.DARK)
+
+    assert alternate_lum() < 128, "切过主题之后交替行又变亮了"
 def test_interrupt_handler_installs_a_heartbeat_timer(qapp, monkeypatch):
     """光装 signal handler 是没用的，必须配一个把控制权交还解释器的定时器。
 

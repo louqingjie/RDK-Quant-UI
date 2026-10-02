@@ -9,11 +9,54 @@ findings、镜像清单、逐层量化误差、子图指标……全是"列 + �
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QTableView
 
 from ..metrics import METRICS
+
+
+class TableView(QTableView):
+    """带"交替行配色"修正的只读表格。
+
+    **为什么要这个子类**：`alternatingRowColors` 打开时，Qt 的 item delegate 会用
+    **调色板的 `AlternateBase`** 作为行背景 brush，而这个 brush **优先于 QSS 的
+    `alternate-background-color`**。偏偏 `app.setStyleSheet()` 会让 `QStyleSheetStyle`
+    按**样式自带的标准调色板**重算每个控件的调色板——`AlternateBase` 不在 QSS 的
+    映射范围里，于是退回成白色。
+
+    实测（暗色主题，用户截图里那些"白行"）：
+        表格自己的 AlternateBase = #ffffff（白）
+        而 app 调色板 = #24272c（暗）
+        渲染结果 = 白底 + 浅色文字 → **整行看起来是空的**
+    也实测过"重新设一遍 app 调色板"没用——那是按控件算的。
+
+    所以把 app 调色板的 `AlternateBase` 显式同步到控件上；并且在调色板变化时重新
+    同步，因为主题切换会再次触发 `QStyleSheetStyle` 重算，不重同步就会退回白色。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.sync_alternate_base()
+
+    def sync_alternate_base(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        want = app.palette().color(QPalette.ColorRole.AlternateBase)
+        current = self.palette().color(QPalette.ColorRole.AlternateBase)
+        # 已经对了就什么都不做 —— 这同时是 changeEvent 里的防重入条件
+        if current == want:
+            return
+        palette = QPalette(self.palette())
+        palette.setColor(QPalette.ColorRole.AlternateBase, want)
+        self.setPalette(palette)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            # setPalette 会再次触发 PaletteChange；sync 内部的"已经对了"判断负责收敛
+            self.sync_alternate_base()
 
 
 def make_table(
@@ -28,7 +71,7 @@ def make_table(
     `fit_columns=True` 会按内容自适应列宽——适合列数少、内容短的结论型表格；
     列多且行多的明细表应保持默认，让用户自己拖。
     """
-    view = QTableView()
+    view = TableView()
     view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     view.setAlternatingRowColors(True)
