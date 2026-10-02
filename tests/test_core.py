@@ -93,21 +93,43 @@ def test_run_argv_windows_normalizes_backslashes_and_skips_user():
     assert "--user" not in argv
 
 
-def test_run_argv_posix_matches_host_user():
-    # 显式传 uid:gid，这样在 Windows 上也能验证这条 argv 通路
-    argv = build_run_argv(_spec(windows=False, user="1000:1000"))
+def test_ownership_fix_is_skipped_when_everything_is_ours(tmp_path: Path):
+    """工作区里的文件都属于当前用户时，不该为此多起一个容器。
+
+    stat 是便宜的，但多起一次容器不是（约 1 秒）。所以先查再动手。
+    """
+    from rdkquant.core.runner import ContainerRunner
+
+    runner = ContainerRunner(image="img:tag", workspace=tmp_path)
+    (tmp_path / "mine.txt").write_text("x")
+    assert runner._ownership_needs_fixing() is False
+
+
+def test_run_argv_never_passes_user_by_default():
+    """默认**不能**传 `--user` —— 传了工具链整个跑不起来。
+
+    这里曾经是反过来的：早先传 `--user $(id -u):$(id -g)`，理由是"别让挂载卷里的
+    产物变成 root 所有"。那个理由被实测推翻了：X5 CPU 镜像把 torch 装在
+    `/root/.local/lib/python3.10/site-packages/`，而 `/root` 权限是 700 —— uid 1000
+    连进都进不去，`hmct/ir/onnx_graph.py` 那句 `import torch` 直接 ModuleNotFoundError，
+    `hb_mapper` 连 `--version` 都打不出来。
+
+    产物属主改用"跑完之后按需 chown"解决，不拿工具链的可用性去换。
+    """
+    argv = build_run_argv(_spec(windows=False))
+    assert "--user" not in argv
+
+
+def test_run_argv_can_still_force_a_user_if_asked():
+    """留一个显式出口，但默认关着。"""
+    argv = build_run_argv(_spec(windows=False, run_as_root=False, user="1000:1000"))
     assert argv[argv.index("--user") + 1] == "1000:1000"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows 上没有 os.getuid()")
-def test_run_argv_posix_derives_user_from_process():
-    argv = build_run_argv(_spec(windows=False))
+def test_run_argv_derives_user_from_process_when_asked():
+    argv = build_run_argv(_spec(windows=False, run_as_root=False))
     assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
-
-
-def test_run_argv_can_disable_host_user():
-    argv = build_run_argv(_spec(windows=False, match_host_user=False, user="1:1"))
-    assert "--user" not in argv
 
 
 def test_run_argv_gpus_and_readonly_mounts():

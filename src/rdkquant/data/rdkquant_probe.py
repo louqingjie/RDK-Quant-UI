@@ -426,6 +426,12 @@ def cmd_inputs(argv):
             payload["problems"].append(
                 "输入 %s 含动态维度 %s —— hb_mapper infer 不支持动态 shape，请先固定下来"
                 % (item["name"], item["shape"]))
+        # 官方要求 ONNX 输入是 float32。实测拿一个 float16 输入的模型跑 checker，
+        # 会报一句很难懂的 "unsupported input data type" —— 提前在这里说清楚。
+        if item["dtype"] not in ("float32", "unknown(0)"):
+            payload["problems"].append(
+                "输入 %s 的类型是 %s，官方要求 float32。请在训练侧以 float32 导出后再量化"
+                % (item["name"], item["dtype"]))
     return finish(payload)
 
 

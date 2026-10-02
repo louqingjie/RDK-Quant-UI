@@ -80,9 +80,11 @@ class RunSpec:
     env: tuple[tuple[str, str], ...] = ()
     name: str | None = None
     remove: bool = True
-    # 让容器以宿主机当前用户身份运行，避免挂载卷里的产物变成 root 所有。
-    # 官方 FAQ 里「拷贝回来的文件权限不对」就是这个坑。
-    match_host_user: bool = True
+    #: 容器**必须**以镜像默认用户（root）运行，见 build_run_argv 里的长注释。
+    #: 这个开关留着只是为了让单测能构造出别的情况。
+    run_as_root: bool = True
+    #: 跑完把工作区属主改回宿主机用户（只在实际需要时才动手）。
+    fix_ownership: bool = True
     # 显式覆盖 uid:gid。留空则从当前进程推导——单独抽出来是为了能跨平台单测。
     user: str | None = None
     network: str | None = None   # 默认不传：hb_mapper 不需要网络
@@ -109,7 +111,24 @@ def build_run_argv(spec: RunSpec) -> list[str]:
     if spec.network:
         argv += ["--network", spec.network]
 
-    if spec.match_host_user and not windows:
+    # ⚠️ 这里**刻意不传 `--user`**，让容器以镜像默认的 root 运行。
+    #
+    # 早先的版本传了 `--user $(id -u):$(id -g)`，理由是"别让挂载卷里的产物变成
+    # root 所有"。那个理由是错的，而且代价极大：**整个工具链会跑不起来**。
+    #
+    # 实测（X5 CPU v1.2.8-py310）：
+    #     torch 1.13.0+cpu 装在 /root/.local/lib/python3.10/site-packages/
+    #     sys.path 靠 HOME=/root 才包含它
+    #     /root 权限是 700 → uid 1000 连进都进不去
+    #     于是 hmct/ir/onnx_graph.py 第 21 行的 `import torch` 直接 ModuleNotFoundError
+    #     hb_mapper 连 --version 都打不出来
+    #
+    # 试过的绕法都不成立：`-e HOME=/root` 和 `-e PYTHONPATH=/root/.local/...`
+    # 都因为 /root 是 700 而失败。唯一可行的是以 root 运行。
+    #
+    # 产物属主的问题改用**跑完之后按需 chown** 解决（见 ContainerRunner.run），
+    # 而不是牺牲工具链的可用性。
+    if not spec.run_as_root and not windows:
         uid = spec.user
         if uid is None and hasattr(os, "getuid"):
             uid = f"{os.getuid()}:{os.getgid()}"
@@ -138,7 +157,10 @@ class ContainerRunner:
     gpus: bool = False
     extra_mounts: tuple[Mount, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
-    match_host_user: bool = True
+    run_as_root: bool = True
+    fix_ownership: bool = True
+    #: 显式覆盖 uid:gid；留空则用当前进程的。只在 run_as_root=False 或 chown 时用。
+    user: str | None = None
 
     def argv(self, command: Sequence[str], *, workdir: str = DEFAULT_WORKDIR) -> list[str]:
         return build_run_argv(
@@ -151,7 +173,8 @@ class ContainerRunner:
                 gpus=self.gpus,
                 extra_mounts=self.extra_mounts,
                 env=self.env,
-                match_host_user=self.match_host_user,
+                run_as_root=self.run_as_root,
+                fix_ownership=self.fix_ownership,
             )
         )
 
@@ -167,7 +190,50 @@ class ContainerRunner:
             return 127
         argv = self.argv(command)
         on_line("$ " + " ".join(argv))
-        return stream_lines(argv, on_line, cancel=cancel)
+        rc = stream_lines(argv, on_line, cancel=cancel)
+        self._fix_ownership(on_line)
+        return rc
+
+    # ------------------------------------------------------------------
+    def _ownership_needs_fixing(self) -> bool:
+        """工作区里有没有不属于当前用户的顶层条目。
+
+        先检查再动手：容器以 root 运行，但绝大多数命令（比如探针）不会往工作区里
+        写东西，没必要为此多起一个容器。并且这个检查只是 stat，很便宜。
+        """
+        if os.name == "nt" or not hasattr(os, "getuid"):
+            return False
+        me = os.getuid()
+        try:
+            entries = list(self.workspace.iterdir())
+        except OSError:
+            return False
+        for entry in entries:
+            try:
+                if entry.stat().st_uid != me:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _fix_ownership(self, on_line: LineCallback) -> None:
+        """把工作区属主改回宿主机用户。
+
+        容器以 root 跑（必须，见 build_run_argv 的说明），hb_mapper 写出来的
+        `hb_mapper_checker.log`、`.hb_check/` 就都是 root 所有的。文件本身还能删
+        （删文件看的是父目录的写权限），但 root 所有的**目录**用户清不掉，很烦。
+
+        所以跑完补一次很短的 chown。**失败不影响主命令的退出码**——这只是收拾
+        现场，不是主流程的一部分。
+        """
+        if not self.fix_ownership or not self.run_as_root:
+            return
+        if not self._ownership_needs_fixing():
+            return
+        uid = self.user or f"{os.getuid()}:{os.getgid()}"
+        on_line(f"[清理] 工作区里有 root 所有的文件，改回 {uid}")
+        argv = self.argv(["chown", "-R", uid, DEFAULT_WORKDIR])
+        stream_lines(argv, lambda _line: None, cancel=None)
 
 
 def default_shm_size(total_ram_bytes: int) -> str:
