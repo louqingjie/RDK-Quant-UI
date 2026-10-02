@@ -17,7 +17,7 @@ from .logpanel import LogPanel
 from .metrictile import MetricTile
 from .statuspill import StatusPill, Tone
 from .stepper import StepItem, Stepper, StepState
-from .tablemodel import TableModel, make_table
+from .tablemodel import TableModel, fit_columns_to_content, make_table
 
 __all__ = [
     "Card",
@@ -33,5 +33,6 @@ __all__ = [
     "Stepper",
     "TableModel",
     "Tone",
+    "fit_columns_to_content",
     "make_table",
 ]

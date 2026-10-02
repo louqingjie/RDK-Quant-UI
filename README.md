@@ -129,13 +129,17 @@ sudo usermod -aG docker "$USER"     # 之后需要重新登录
 
 | 现象 | 原因与处理 |
 |---|---|
+| **`ensurepip returned non-zero exit status 1`**，或 `[Errno 1] Operation not permitted: .../bin/activate.fish` | **在 WSL 的 `/mnt/c` 上跑。** 该挂载是 `uid=0;gid=0`，所有文件都算 root 所有，非 root 用户 `chmod` 会 EPERM，而 `python3 -m venv` 必须给 activate 脚本 chmod。**把仓库放到 Linux 文件系统里**（`~/src/...`）。脚本现在会提前拦下并给出确切命令 |
 | `Could not load the Qt platform plugin "xcb"` | 缺系统库。跑 `./scripts/linux-setup.sh --check`，它会把 `ldd` 里 `not found` 的库名列出来。最常见的是缺 `libxcb-cursor0` |
-| 想看 Qt 到底在找什么 | `QT_DEBUG_PLUGINS=1 .venv/bin/rdkquant ui` |
+| `python3 -m venv` 提示 `ensurepip is not available` | 缺 `python3-venv`——**最小化的 Ubuntu/WSL 默认没装**。`sudo apt-get install -y python3-venv`（脚本现在会自动装） |
+| `apt-get update` 长时间没反应 | 默认的 `archive.ubuntu.com` 在国内常常不可用。换成清华/阿里镜像源再试 |
+| 要看 Qt 到底在找什么 | `QT_DEBUG_PLUGINS=1 .venv/bin/rdkquant ui` |
 | 界面里中文是方块 | `sudo apt-get install -y fonts-noto-cjk`；本工具也会在状态栏提示 |
 | `no Qt platform plugin could be initialized` 且没有 DISPLAY | 当前是纯命令行会话。用 WSL2（WSLg 自带图形支持），或 `ssh -X`，或先起 Xvfb 再 VNC |
 | 界面完全正常但量化跑不了 | Docker 没装/没起，或工具链镜像没导入。看「环境准备」页的体检结论 |
 | Wayland 下行为怪异 | 试 `QT_QPA_PLATFORM=xcb .venv/bin/rdkquant ui` |
 | pip 安装 PySide6 报 `not a supported wheel` | glibc < 2.34（Ubuntu 20.04）。升级系统，或改用分离部署 |
+| Docker 版本被体检判为太旧 | `--workdir` 需要 17.09+，`--gpus` 需要 19.03+。装 `docker.io` 或 `docker-ce` 均可，见上文选型说明 |
 
 ## 开发
 

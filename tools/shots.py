@@ -56,6 +56,12 @@ def _single(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 必须先 apply_theme 再构造界面 —— 顺序和 app.py 的 run() 一致。
+    # apply_theme 内部会按当前字体重算尺寸令牌（configure），而控件是在构造时
+    # 读取这些令牌的。顺序反了的话，控件用的是默认尺寸、而后面按行数定高用的是
+    # 重算后的尺寸，两边对不上，表格就会莫名其妙地裁掉最后一行。
+    apply_theme(app, mode, platform_palette=platform_palette)
+
     shell = AppShell(Path(args.workspace), platform_palette=platform_palette, theme=mode)
     shell.show()
     for _ in range(6):

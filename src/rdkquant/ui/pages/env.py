@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +39,7 @@ from ..widgets import (
     MetricTile,
     TableModel,
     Tone,
+    fit_columns_to_content,
     make_table,
 )
 from ..workers import TaskRunner
@@ -45,7 +47,26 @@ from ..workers import TaskRunner
 IMAGE_HEADERS = ["ID", "板型", "架构", "变体", "离线包", "导入后预计占用", "本机", "说明"]
 
 _LEVEL_TEXT = {LEVEL_OK: "通过", LEVEL_WARN: "警告", LEVEL_ERROR: "错误"}
-_LEVEL_TONE = {LEVEL_OK: Tone.OK, LEVEL_WARN: Tone.WARN, LEVEL_ERROR: Tone.DANGER}
+
+
+def fit_table_height(view: QTableView, model: TableModel, *, min_rows: int = 3) -> None:
+    """把结论型表格的高度钉成"表头 + N 行"。
+
+    为什么不能用 `setMinimumHeight`：`QTableView` 的默认 `sizeHint()` 是
+    256×192，放进布局它会先按 sizeHint 拿走 192px，而 minimumHeight 只是**下限**、
+    拦不住它。结果就是表格里留一大片空白，同时把下面那张卡片顶出可视区
+    —— 实测现象是镜像表只剩表头露在外面，四行数据全在折叠线以下。
+
+    行高刻意**问视图要实际值**（`rowHeight()`），而不是拿尺寸令牌去乘：
+    令牌是按 `app.font()` 算的，而表格实际渲染用的字体可能与之不同，
+    两者对不上时算出来的高度会把最后一行裁掉（带出内部滚动条）。
+    结论型表格本来就不该出现滚动条，所以直接定高最省事、也最可预测。
+    行数是动态的（体检结论可能 2~6 条），所以每次填完数据都要重算一次。
+    """
+    rows = max(min_rows, model.rowCount())
+    row_height = view.rowHeight(0) if model.rowCount() > 0 else METRICS.row_height
+    row_height = max(row_height, METRICS.row_height)
+    view.setFixedHeight(view.horizontalHeader().height() + rows * row_height + 2)
 
 
 class EnvPage(QWidget):
@@ -144,17 +165,17 @@ class EnvPage(QWidget):
         card.add(self.verdict)
 
         self.findings_model = TableModel(["级别", "说明", "下一步"])
-        self.findings_view = make_table(["级别", "说明", "下一步"], fit_columns=True)
+        self.findings_view = make_table(["级别", "说明", "下一步"])
         self.findings_view.setModel(self.findings_model)
+        # 列宽模式必须在 setModel 之后设（列数来自 model）
         self.findings_view.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
         self.findings_view.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
-        # 结论型表格不该出现滚动条：高度按"表头 + 4 行"给足
-        self.findings_view.setMinimumHeight(m.control_height + 4 * m.row_height + 2)
-        card.add(self.findings_view, 1)
+        # 高度由 fit_table_height() 在填完数据后按行数钉死，这里只留一个起步值
+        card.add(self.findings_view)
 
         self.recheck_btn = QPushButton("重新体检")
         self.recheck_btn.clicked.connect(self.refresh_report)
@@ -173,12 +194,13 @@ class EnvPage(QWidget):
         )
 
         self.image_model = TableModel(IMAGE_HEADERS)
-        self.image_view = make_table(IMAGE_HEADERS, fit_columns=True)
+        self.image_view = make_table(IMAGE_HEADERS)
         self.image_view.setModel(self.image_model)
+        # 必须在 setModel 之后：列宽模式依赖 model 的列数
+        fit_columns_to_content(self.image_view)
         self.image_view.selectionModel().selectionChanged.connect(self._on_image_selected)
-        # 四个镜像要能一眼看全，否则用户得在滚动条里找
-        self.image_view.setMinimumHeight(m.control_height + 4 * m.row_height + 2)
-        card.add(self.image_view, 1)
+        # 高度同样交给 fit_table_height()（4 个镜像要能一眼看全）
+        card.add(self.image_view)
 
         row = QHBoxLayout()
         row.setSpacing(m.space_2)
@@ -275,6 +297,7 @@ class EnvPage(QWidget):
             )
             cell_colors[(i, 0)] = tone_map.get(finding.level, colors["muted"])
         self.findings_model.set_rows(rows, cell_colors)
+        fit_table_height(self.findings_view, self.findings_model, min_rows=3)
 
     def _apply_tiles(self) -> None:
         report = self.report
@@ -334,6 +357,7 @@ class EnvPage(QWidget):
         self._updating = True
         try:
             self.image_model.set_rows(rows, colors)
+            fit_table_height(self.image_view, self.image_model, min_rows=4)
             if self._selected_id:
                 for i, spec in enumerate(self.specs):
                     if spec.id == self._selected_id:

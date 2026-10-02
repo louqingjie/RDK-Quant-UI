@@ -40,21 +40,34 @@ def make_table(
     header = view.horizontalHeader()
     header.setHighlightSections(False)
     header.setFixedHeight(METRICS.control_height)
-
-    if fit_columns:
-        # 注意：setStretchLastSection 会盖掉逐列的 ResizeToContents，
-        # 所以这两个模式必须二选一，不能叠加。
-        header.setStretchLastSection(False)
-        last = len(headers) - 1
-        for index in range(len(headers)):
-            if stretch_last and index == last:
-                header.setSectionResizeMode(index, QHeaderView.ResizeMode.Stretch)
-            else:
-                header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
-    else:
+    if not fit_columns:
         header.setStretchLastSection(stretch_last)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     return view
+
+
+def fit_columns_to_content(view: QTableView, *, stretch_last: bool = True) -> None:
+    """按内容自适应列宽，最后一列吃掉剩余宽度。
+
+    **必须在 `setModel()` 之后调用。** 列数来自 model，模型还没挂上时
+    `setSectionResizeMode(i, ...)` 对不存在的列号是无效的——之前把这段逻辑
+    放在 make_table() 里（先建视图、后挂模型），结果就是各列按内容排完之后
+    右侧留出一条没有表头覆盖的空白（实测到的现象）。
+
+    另外注意 `setStretchLastSection` 会盖掉逐列的 ResizeToContents，
+    所以这两个模式必须二选一，不能叠加。
+    """
+    model = view.model()
+    count = model.columnCount() if model is not None else 0
+    if count <= 0:
+        return
+    header = view.horizontalHeader()
+    header.setStretchLastSection(False)
+    for index in range(count):
+        if stretch_last and index == count - 1:
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.Stretch)
+        else:
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
 
 
 class TableModel(QAbstractTableModel):

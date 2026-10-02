@@ -70,7 +70,38 @@ PY
 ok "Python 版本可用（$PY）"
 
 # ---------------------------------------------------------------------------
-# 2. Qt 运行所需的系统库
+# 1.5 文件系统是否支持 chmod
+# ---------------------------------------------------------------------------
+# `python3 -m venv` 必须给 activate 脚本 chmod 0755。这件事在 WSL 的 /mnt/c 上
+# 做不到：那里挂载参数是 uid=0;gid=0，所有文件都算 root 所有，而你以普通用户
+# 身份运行，chmod 直接 EPERM。venv 会以 "ensurepip returned non-zero exit
+# status 1" 这种完全指不到根因的方式失败（实测踩到过）。
+# 与其让人对着那句报错猜，不如在这里提前拦下说清楚。
+perm_probe="$REPO_ROOT/.rdkquant-perm-probe.$$"
+if ! { : > "$perm_probe" && chmod 700 "$perm_probe" && [ -x "$perm_probe" ]; } 2>/dev/null; then
+    rm -f "$perm_probe" 2>/dev/null || true
+    case "$REPO_ROOT" in
+        /mnt/*)
+            die "这个目录在 Windows 文件系统上：$REPO_ROOT
+     该挂载不支持 chmod，所以 python3 -m venv 无法在这里工作。
+     请把仓库放到 Linux 文件系统里再运行，例如：
+
+         mkdir -p ~/src
+         cp -r \"$REPO_ROOT\" ~/src/rdk-quant
+         cd ~/src/rdk-quant && ./scripts/linux-setup.sh --run
+
+     （附带好处：pip 要装约 250 MB 的 PySide6，在 Linux 文件系统上快得多。
+       在 Windows 侧编辑代码仍然可以，用 \\\\wsl$\\Ubuntu-22.04\\home\\$USER\\src\\rdk-quant 打开即可。）" ;;
+        *)
+            die "当前目录所在的文件系统不支持 chmod，无法创建虚拟环境：$REPO_ROOT
+     （venv 需要给 activate 脚本设置可执行位）" ;;
+    esac
+fi
+rm -f "$perm_probe"
+ok "文件系统支持 chmod"
+
+# ---------------------------------------------------------------------------
+# 2. 系统依赖
 # ---------------------------------------------------------------------------
 # 这些是 Qt 6 的 xcb 平台插件在 Debian/Ubuntu 上的常规依赖集合。
 # 缺 libxcb-cursor0 是最常见的一种（Qt 6.5 起成为硬依赖），
@@ -81,32 +112,57 @@ QT_LIBS=(
     libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
     libdbus-1-3 libfontconfig1
 )
+# python3-venv 在最小化的 Ubuntu（包括 WSL 的默认镜像）上**默认没装**，
+# 少了它 `python3 -m venv` 会直接失败并提示装 python3.10-venv。
+# 这是全新 Linux 环境上第一次运行最常见的拦路虎，实测踩到过。
+PY_DEPS=(python3-venv python3-pip)
 
 have_apt=0
 command -v apt-get >/dev/null 2>&1 && have_apt=1
 
 missing_libs=()
 if [ "$have_apt" = 1 ]; then
-    for pkg in "${QT_LIBS[@]}"; do
+    for pkg in "${QT_LIBS[@]}" "${PY_DEPS[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" \
             || missing_libs+=("$pkg")
     done
 fi
 
-if [ "$have_apt" = 1 ] && [ "${#missing_libs[@]}" -gt 0 ]; then
-    warn "缺少 ${#missing_libs[@]} 个系统库：${missing_libs[*]}"
+# 就算包管理器认为 venv 装了，也实打实试一次 ensurepip——
+# 发行版把 python3-venv 拆包的方式并不一致。
+venv_ok=1
+"$PY" -c "import ensurepip" >/dev/null 2>&1 || venv_ok=0
+
+if [ "$have_apt" = 1 ] && { [ "${#missing_libs[@]}" -gt 0 ] || [ "$venv_ok" = 0 ]; }; then
+    if [ "${#missing_libs[@]}" -gt 0 ]; then
+        warn "缺少 ${#missing_libs[@]} 个系统包：${missing_libs[*]}"
+    fi
+    if [ "$venv_ok" = 0 ]; then
+        warn "当前 Python 缺少 ensurepip，无法创建虚拟环境"
+    fi
     if [ "$CHECK_ONLY" = 1 ]; then
         warn "（--check 模式，不安装）"
     else
         info "用 apt 安装（需要 sudo）"
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends "${missing_libs[@]}"
-        ok "系统库已就绪"
+        # 不用 -qq：apt-get update 在全新系统或慢镜像上可能要几分钟，
+        # 把输出全静掉会让人以为卡死了。
+        warn "先刷新软件源，全新系统或慢镜像下可能要几分钟…"
+        sudo apt-get update -q
+        # 数组拼数组，避免 ${arr[*]} 的空值/分词坑
+        apt_pkgs=("${missing_libs[@]}" "${PY_DEPS[@]}")
+        sudo apt-get install -y --no-install-recommends "${apt_pkgs[@]}"
+        ok "系统依赖已就绪"
+        if ! "$PY" -c "import ensurepip" >/dev/null 2>&1; then
+            die "装完仍然无法 import ensurepip，请手动执行：sudo apt-get install -y python3-venv"
+        fi
     fi
 elif [ "$have_apt" = 0 ]; then
-    warn "没有 apt-get，跳过系统库检查。若界面起不来，请用 --check 看缺哪些 .so。"
+    warn "没有 apt-get，跳过系统依赖检查。若界面起不来，用 --check 看缺哪些 .so。"
+    if [ "$venv_ok" = 0 ]; then
+        die "当前 Python 缺少 ensurepip，请先安装对应发行版的 python3-venv 包。"
+    fi
 else
-    ok "Qt 所需的系统库看起来齐全"
+    ok "Qt 运行库与 Python 打包工具都齐全"
 fi
 
 # 中文字体：缺了会把界面渲染成一堆方块。这个包比较大，只提示不强制装。
@@ -127,11 +183,23 @@ fi
 # ---------------------------------------------------------------------------
 # 3. 虚拟环境与包安装
 # ---------------------------------------------------------------------------
+# 不能只看目录存不存在：上一次失败（比如没装 python3-venv）会留下一个没有 pip
+# 的空壳 .venv，直接复用的话后面每一步都会以奇怪的方式失败。实测踩到过。
+VPY="$VENV/bin/python"
+if [ -d "$VENV" ] && ! "$VPY" -c "import pip" >/dev/null 2>&1; then
+    warn "发现不可用的虚拟环境（多半是上次中断留下的），重建它"
+    # 删除前先确认绝对路径确实在仓库内，绝不 rm -rf 一个算出来的陌生路径
+    venv_abs="$(cd "$(dirname "$VENV")" && pwd)/$(basename "$VENV")"
+    case "$venv_abs" in
+        "$REPO_ROOT"/*) rm -rf -- "$venv_abs" ;;
+        *) die "拒绝删除仓库之外的路径：$venv_abs" ;;
+    esac
+fi
+
 if [ ! -d "$VENV" ]; then
     info "创建虚拟环境 $VENV"
     "$PY" -m venv "$VENV"
 fi
-VPY="$VENV/bin/python"
 [ -x "$VPY" ] || die "虚拟环境里没有 $VPY"
 
 info "安装本工具（含 UI 依赖）"
