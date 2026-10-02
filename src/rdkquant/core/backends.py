@@ -21,6 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from . import containerops
+from .calib import CalibBuildSpec
+from .containerops import ProgressCallback
 from .proc import LineCallback, which
 from .runner import ContainerRunner, Mount
 
@@ -84,6 +87,13 @@ class Workspace:
 # 协议
 # --------------------------------------------------------------------------
 class ToolchainBackend(Protocol):
+    """工具链后端。
+
+    前两个是"跑工具链命令"，后五个是"在容器里做计算"。之所以都放在后端协议上：
+    页面代码只认后端，于是 Mock 与真实容器的代码路径**完全一致**，CI 不需要
+    Docker 也能把整条 UI 流程压出来。
+    """
+
     name: str
 
     def check(
@@ -95,6 +105,34 @@ class ToolchainBackend(Protocol):
         self, config_path: Path, *, on_line: LineCallback,
         cancel: threading.Event | None = None,
     ) -> int: ...
+
+    # --- 以下五个都由容器侧探针实现（见 core/containerops.py）---
+
+    def inspect_model(
+        self, onnx_path: Path, *, on_line: LineCallback,
+        cancel: threading.Event | None = None,
+    ) -> dict: ...
+
+    def scan_calib(
+        self, directory: Path, *, shape: str | None = None, dtype: str = "float32",
+        on_line: LineCallback, cancel: threading.Event | None = None,
+    ) -> dict: ...
+
+    def build_calib(
+        self, src: Path, out: Path, spec: CalibBuildSpec, *, on_line: LineCallback,
+        on_progress: ProgressCallback | None = None,
+        cancel: threading.Event | None = None,
+    ) -> dict: ...
+
+    def thumbnails(
+        self, src: Path, out: Path, *, size: int = 96, on_line: LineCallback,
+        cancel: threading.Event | None = None,
+    ) -> dict: ...
+
+    def probe_env(
+        self, *, on_line: LineCallback,
+        cancel: threading.Event | None = None,
+    ) -> dict: ...
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +186,45 @@ class DockerBackend:
         """容器里 hb_mapper 的版本——排查问题时的第一条信息。"""
         rc = self.runner.run(["hb_mapper", "--version"], on_line=lambda _l: None)
         return "ok" if rc == 0 else f"不可用(rc={rc})"
+
+    # ------------------------------------------------------------------
+    # 容器侧计算：全部委托给探针客户端（core/containerops.py）
+    # ------------------------------------------------------------------
+    def probe_env(self, *, on_line: LineCallback, cancel=None) -> dict:
+        return containerops.probe_env(
+            self.runner, self.workspace, on_line=on_line, cancel=cancel
+        )
+
+    def inspect_model(self, onnx_path: Path, *, on_line: LineCallback, cancel=None) -> dict:
+        return containerops.probe_inputs(
+            self.runner, self.workspace, self.workspace.rel(onnx_path),
+            on_line=on_line, cancel=cancel,
+        )
+
+    def scan_calib(self, directory: Path, *, shape=None, dtype="float32",
+                   on_line: LineCallback, cancel=None) -> dict:
+        return containerops.probe_calib_scan(
+            self.runner, self.workspace, self.workspace.rel(directory),
+            shape=shape, dtype=dtype, on_line=on_line, cancel=cancel,
+        )
+
+    def build_calib(self, src: Path, out: Path, spec: CalibBuildSpec, *,
+                    on_line: LineCallback, on_progress=None, cancel=None) -> dict:
+        return containerops.probe_calib_build(
+            self.runner, self.workspace,
+            self.workspace.rel(src), self.workspace.rel(out),
+            shape=spec.shape, layout=spec.layout, color=spec.color, dtype=spec.dtype,
+            mean=spec.mean, scale=spec.scale,
+            on_line=on_line, on_progress=on_progress, cancel=cancel,
+        )
+
+    def thumbnails(self, src: Path, out: Path, *, size: int = 96,
+                   on_line: LineCallback, cancel=None) -> dict:
+        return containerops.probe_thumbs(
+            self.runner, self.workspace,
+            self.workspace.rel(src), self.workspace.rel(out),
+            size=size, on_line=on_line, cancel=cancel,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +281,88 @@ _MOCK_COMPILE = """\
 """
 
 
+# --------------------------------------------------------------------------
+# 假后端返回的 JSON：**形状与真实探针完全一致**
+#
+# 这不是"随便编点数据"——test_backends.py 会拿这里和真实探针的契约对比，防止
+# 两边漂移。数值取自 X5 CPU 容器的实测环境（见 tests/fixtures/CONTAINER_FINDINGS.md）。
+# --------------------------------------------------------------------------
+#: 假校准集张数。取 48 是因为它落在官方建议区间 20~100 之内，不必额外造警告。
+MOCK_CALIB_COUNT = 48
+
+MOCK_ENV = {
+    "ok": True,
+    "python": "3.10.15",
+    "executable": "/usr/bin/python3",
+    "imaging_backend": "PIL",
+    "imaging_candidates": ["PIL", "skimage", "cv2"],
+    "onnx": "1.12.0",
+    "numpy": "1.23.0",
+}
+
+MOCK_INPUTS = {
+    "ok": True,
+    "path": "model.onnx",
+    "size": 0,
+    "python": "3.10.15",
+    "onnx": "1.12.0",
+    "ir_version": 8,
+    "opset": 11,
+    "inputs": [
+        {"name": "images", "shape": [1, 3, 640, 640],
+         "dtype": "float32", "dynamic": False},
+    ],
+    "outputs": [
+        {"name": "output0", "shape": [1, 84, 8400],
+         "dtype": "float32", "dynamic": False},
+    ],
+    "op_histogram": [
+        ["Conv", 120], ["Mul", 40], ["Sigmoid", 33], ["Concat", 21],
+        ["Resize", 4], ["Softmax", 3], ["MaxPool", 3], ["Add", 2],
+    ],
+    "problems": [],
+    "warnings": [],
+}
+
+MOCK_SCAN = {
+    "ok": True,
+    "directory": "cal_images",
+    "imaging_backend": "PIL",
+    "count": MOCK_CALIB_COUNT,
+    "image_like": MOCK_CALIB_COUNT,
+    "binary_like": 0,
+    "measured": True,
+    "files": [],
+    "resolutions": [[640, 640, MOCK_CALIB_COUNT]],
+    "duplicates": [],
+    "exposure": {
+        "sampled": 32, "min_mean": 42.1, "max_mean": 187.3,
+        "max_near_black": 0.008, "max_near_white": 0.011,
+    },
+    "problems": [],
+    "warnings": [],
+}
+
+#: 每个校准样本的字节数：1×3×640×640 float32
+MOCK_SAMPLE_BYTES = 3 * 640 * 640 * 4
+
+MOCK_BUILD = {
+    "ok": True,
+    "backend": "PIL",
+    "written": MOCK_CALIB_COUNT,
+    "failed": 0,
+    "failures": [],
+    "bytes": MOCK_CALIB_COUNT * MOCK_SAMPLE_BYTES,
+    "bytes_per_sample": MOCK_SAMPLE_BYTES,
+    "out_dir": "calib_bin_f32",
+    "shape": [1, 3, 640, 640],
+    "layout": "NCHW",
+    "color": "bgr",
+    "dtype": "float32",
+    "normalized": False,
+}
+
+
 @dataclass
 class MockBackend:
     """不依赖 Docker 的假实现。刻意把耗时做出来，好验证进度条与取消逻辑。"""
@@ -247,6 +406,86 @@ class MockBackend:
 
     def version(self) -> str:
         return "mock"
+
+    # ------------------------------------------------------------------
+    # 容器侧计算的假实现
+    #
+    # 返回的 JSON **形状与真实探针完全一致**（test_backends.py 里有契约漂移检测），
+    # 所以页面代码在 Mock 下走的是同一条路径。数值取 X5 容器实测到的环境。
+    # ------------------------------------------------------------------
+    def probe_env(self, *, on_line: LineCallback, cancel=None) -> dict:
+        on_line("$ (mock) probe.py env")
+        on_line("[mock] 容器环境：python 3.10.15 / onnx 1.12.0 / 图像库 PIL")
+        return dict(MOCK_ENV)
+
+    def inspect_model(self, onnx_path: Path, *, on_line: LineCallback, cancel=None) -> dict:
+        self.workspace.ensure()
+        on_line(f"$ (mock) probe.py inputs {onnx_path.name}")
+        if not onnx_path.is_file():
+            # 真实探针会返回 ok:false，这里也照做，不让 Mock 比真实更宽松
+            on_line(f"[mock] 模型文件不存在：{onnx_path}")
+        payload = dict(MOCK_INPUTS)
+        payload["path"] = onnx_path.name
+        payload["size"] = onnx_path.stat().st_size if onnx_path.is_file() else 0
+        return payload
+
+    def scan_calib(self, directory: Path, *, shape=None, dtype="float32",
+                   on_line: LineCallback, cancel=None) -> dict:
+        self.workspace.ensure()
+        on_line(f"$ (mock) probe.py calib-scan {directory.name}")
+        entries = (
+            [p for p in directory.iterdir() if p.is_file()] if directory.is_dir() else []
+        )
+        if not entries:
+            on_line("[mock] 目录不存在或为空")
+            payload = dict(MOCK_SCAN)
+            payload.update({
+                "ok": True, "directory": directory.name, "count": 0,
+                "image_like": 0, "binary_like": 0, "resolutions": [],
+                "duplicates": [], "exposure": None,
+                "files": [], "warnings": [], "problems": ["目录是空的"],
+            })
+            return payload
+        payload = dict(MOCK_SCAN)
+        payload["directory"] = directory.name
+        return payload
+
+    def build_calib(self, src: Path, out: Path, spec: CalibBuildSpec, *,
+                    on_line: LineCallback, on_progress=None, cancel=None) -> dict:
+        self.workspace.ensure()
+        on_line(f"$ (mock) probe.py calib-build {src.name} {out.name}")
+        out.mkdir(parents=True, exist_ok=True)
+        count = MOCK_SCAN["count"]
+        per_sample = MOCK_BUILD["bytes_per_sample"]
+        written = 0
+        for index in range(count):
+            if cancel is not None and cancel.is_set():
+                on_line("[已取消]")
+                return {"ok": False, "error": "已取消"}
+            target = out / f"{index:04d}.bin"
+            # truncate 造出**字节数正确**的文件但不真的写数据：UI 开发关心的是
+            # 长度契约与进度，不是几百 MB 的内容。
+            with open(target, "wb") as handle:
+                handle.truncate(per_sample)
+            written += 1
+            if on_progress:
+                on_progress(index + 1, count)
+            if self.delay:
+                time.sleep(self.delay / 4)
+        payload = dict(MOCK_BUILD)
+        payload["written"] = written
+        payload["bytes"] = written * per_sample
+        payload["out_dir"] = out.name
+        on_line(f"[mock] 已写出 {written} 个校准样本到 {out.name}/")
+        return payload
+
+    def thumbnails(self, src: Path, out: Path, *, size: int = 96,
+                   on_line: LineCallback, cancel=None) -> dict:
+        out.mkdir(parents=True, exist_ok=True)
+        on_line(f"$ (mock) probe.py thumbs {src.name} {out.name}")
+        return {
+            "ok": True, "backend": "PIL", "generated": 0, "failed": 0, "files": [],
+        }
 
 
 def make_backend(

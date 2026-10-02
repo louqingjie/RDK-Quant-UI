@@ -154,6 +154,8 @@ class CalibSummary:
     cal_data_type: str = "float32"
     preprocess_on: bool = False
     problems: list[str] = field(default_factory=list)
+    #: 容器内的目录名，S4 写 config.yaml 时用（相对 workspace）
+    cal_data_dir: str = ""
 
     @property
     def usable(self) -> bool:
@@ -171,6 +173,9 @@ class RunContext:
     model_path: Path | None = None
     model_static: bool | None = None      # None = 还没解析过
     model_problems: list[str] = field(default_factory=list)
+    #: S1 从 ONNX 图形状推导出来的 input_parameters，供 S4 预填。
+    #: **只是建议**——训练时的真实布局无法从形状推断，S4 必须让用户确认。
+    suggested_input_parameters: dict[str, str] = field(default_factory=dict)
 
     # --- S2 检查 ---
     checker_passed: bool = False

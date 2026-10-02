@@ -20,22 +20,11 @@ from pathlib import Path
 
 from .proc import run_capture, which
 
+# Finding 与三个级别住在 core/findings.py —— "宿主机体检"和"模型/校准校验"都要用，
+# 让后者去 import 前者是分层错误。这里原样 re-export，既有 import 一律不变。
+from .findings import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, Finding  # noqa: F401
+
 GB = 1024 ** 3
-
-LEVEL_OK = "ok"
-LEVEL_WARN = "warn"
-LEVEL_ERROR = "error"
-
-
-@dataclass(frozen=True)
-class Finding:
-    level: str
-    code: str
-    message: str
-    hint: str = ""
-
-    def as_dict(self) -> dict:
-        return {"level": self.level, "code": self.code, "message": self.message, "hint": self.hint}
 
 
 @dataclass(frozen=True)
