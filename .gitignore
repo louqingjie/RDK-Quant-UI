@@ -3,11 +3,16 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-build/
-dist/
 .venv/
 venv/
 .pytest_cache/
+
+# --- 构建产物 ---
+# .build/ 是打包脚本自己的构建环境（构建期细节，对使用者不可见）
+.build/
+build/
+dist/
+*.AppImage
 
 # --- 本项目的运行产物，不要提交 ---
 runs/

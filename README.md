@@ -6,47 +6,64 @@ Docker 容器里跑**——因为官方编译器只支持 x86 Linux，而且官�
 
 流程严格对齐 D-Robotics 官方文档的章节顺序，界面上的每一步都能追溯到具体章节。
 
-## 环境要求
+## 使用
 
-| 项 | 要求 | 原因 |
+**本工具以自包含程序分发：使用者不需要 Python、不需要 pip、不需要虚拟环境。**
+
+| 项 | 要求 | 说明 |
 |---|---|---|
-| 系统 | **Ubuntu 22.04+ / Debian 12+**（glibc ≥ 2.34） | PySide6 6.11 的 Linux 轮子是 `manylinux_2_34` |
+| 系统 | **Ubuntu 22.04+ / Debian 12+**（glibc ≥ 2.34） | 低于此版本跑不了，见下方「为什么」 |
 | 架构 | x86_64 | 官方工具链只有 x86_64 版本 |
-| Python | 3.10 ~ 3.14 | `pyproject.toml` 里声明的范围 |
-| Docker | 运行量化时需要 | 工具链以官方离线镜像分发 |
+| Docker | **只有做量化时才需要** | 纯看界面、准备模型、检查配置都不需要它 |
 | 中文字体 | 建议装 `fonts-noto-cjk` | 缺了中文会显示成方块 |
+
+```bash
+tar xf rdkquant-<版本>-linux-x86_64.tar.gz
+cd rdkquant
+./rdkquant            # 图形界面
+./rdkquant doctor     # 环境体检（命令行，不需要显示器）
+./rdkquant images …   # 镜像管理
+```
+
+同一个可执行文件既能开界面也能当命令行工具，不用记两个名字。
+
+> **为什么不能「让用户自己装」？** 两条硬约束：
+> 1. Ubuntu 22.04 的仓库里**根本没有 PySide6**（只有 PySide2/Qt5），
+>    `apt install python3-pyside6` 无解；
+> 2. Ubuntu 23.04+ / Debian 12+ 用 PEP 668 锁掉了系统 pip，`pip install` 会被直接拒绝。
+>
+> 所以环境只能由我们带进去。用户机器上装了什么 Python、有没有 venv，与本工具无关。
 
 > ⚠️ **不要把图形界面装进 OpenExplorer 容器。** 那个容器是 Ubuntu 20.04（glibc 2.31），
 > 装不上 PySide6。正确形态就是「UI 在宿主机、`hb_mapper` 在容器里」，这也是本工具的
 > 架构前提。
 
-## 快速开始（Linux 桌面）
+## 从源码构建（开发者）
+
+如果你要改代码，或者想自己出这个自包含程序：
 
 ```bash
 git clone <repo> rdk-quant && cd rdk-quant
-./scripts/linux-setup.sh --run
+./scripts/build-app.sh          # 产出 dist/rdkquant/，167 MB 左右
+./dist/rdkquant/rdkquant        # 直接跑，不需要激活任何环境
 ```
 
-脚本会依次：检查 glibc / Python → 用 apt 补齐 Qt 所需的系统库 → 建虚拟环境并安装
-→ **做一次离屏渲染自检** → 检查图形环境 → 启动界面。
+`build-app.sh` 内部**确实**会建一个虚拟环境，但它是构建期的实现细节，放在
+`.build/` 下，对使用者完全不可见——这就是「把 venv 从用户路径里拿掉」的具体做法：
+不是删掉 venv，而是不让用户碰它。
 
-离屏自检这一步是刻意的：它把「代码/依赖有问题」和「图形环境没配好」分开。否则
-xcb 一报错，你根本不知道是哪一头坏了。
+### 日常开发
 
-装好之后启动：
+开发时才需要环境管理。`dev-setup.sh` 会建 `.venv`、装 dev 依赖、跑离屏自检：
 
 ```bash
-.venv/bin/rdkquant ui
+./scripts/dev-setup.sh --run     # 装好并启动界面
+./scripts/dev-setup.sh --check   # 只诊断，不改动系统
 ```
 
-或者不看界面，先用命令行确认后端：
+启动后：`.venv/bin/rdkquant ui`，命令行用法同上。
 
-```bash
-.venv/bin/rdkquant doctor            # 环境体检
-.venv/bin/rdkquant images list --remote
-```
-
-## 快速开始（Windows 上用 WSL2）
+## 在 Windows 上用 WSL2
 
 图形界面会直接显示在 Windows 桌面上，不需要 VcXsrv 之类的 X 服务器——WSLg 自带。
 
@@ -59,23 +76,20 @@ wsl --install -d Ubuntu-22.04
 **2. 把项目放进 Linux 文件系统**（重要）
 
 ```bash
-# 在 Ubuntu 里执行。不要放在 /mnt/c/... ——
-#   1) 跨文件系统的 IO 很慢，pip 安装会慢到难以忍受
-#   2) git 会因为属主不同报 "dubious ownership"
+# 在 Ubuntu 里执行。开发用的仓库不要放在 /mnt/c/... ——
+#   1) 跨文件系统 IO 很慢，pip 安装会慢到难以忍受
+#   2) 该挂载不支持 chmod，python3 -m venv 会直接失败
+#   3) git 会因为属主不同报 "dubious ownership"
 mkdir -p ~/src && cd ~/src
 git clone <repo> rdk-quant && cd rdk-quant
 ```
 
-如果你确实想继续用 Windows 上那份副本，至少先：
-
-```bash
-git config --global --add safe.directory /mnt/c/Users/<你>/Desktop/RDK-Quantization-UI
-```
+（只是**使用**的话不受这条限制：自包含程序放在哪儿都能跑，它不需要 chmod。）
 
 **3. 装好并启动**
 
 ```bash
-./scripts/linux-setup.sh --run
+./scripts/dev-setup.sh --run
 ```
 
 **4. 量化环境（可选，等要用时再装）**

@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 RDK Quantization UI contributors
 #
-# 在 Linux 上把本工具的图形界面跑起来。
+# ⚠️ 这是**给开发者/贡献者**用的脚本，不是给使用者用的。
 #
-#   ./scripts/linux-setup.sh          安装依赖 + 建虚拟环境 + 装包 + 离屏自检
-#   ./scripts/linux-setup.sh --run    装好之后直接启动界面
-#   ./scripts/linux-setup.sh --deps   只补系统依赖
-#   ./scripts/linux-setup.sh --check  只做诊断，不改动任何东西
+# 它会建虚拟环境、装 dev 依赖、跑测试。普通使用者不应该看到这些——
+# 使用者要的是 scripts/build-app.sh 产出的自包含程序，
+# 那个产物不需要 Python、pip 或 venv。
+#
+#   ./scripts/dev-setup.sh          装依赖 + 建虚拟环境 + 装包 + 离屏自检
+#   ./scripts/dev-setup.sh --run    装好之后直接启动界面
+#   ./scripts/dev-setup.sh --deps   只补系统依赖
+#   ./scripts/dev-setup.sh --check  只做诊断，不改动任何东西
 #
 # 为什么要有这个脚本：在 Linux 上跑 Qt 程序，十次失败有九次是同一个原因——
 # xcb 平台插件缺系统库，报错却是 "Could not load the Qt platform plugin xcb"，
