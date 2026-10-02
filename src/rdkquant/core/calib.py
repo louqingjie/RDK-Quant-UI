@@ -63,6 +63,44 @@ def infer_cal_data_type(directory_name: str) -> str:
     return "float32" if directory_name.rstrip("/").endswith(FLOAT32_SUFFIX) else "uint8"
 
 
+def parse_input_shape(text: str | None) -> tuple[int, ...] | None:
+    """把 `1x3x640x640` 解析成 `(1, 3, 640, 640)`。解析不了返回 None。"""
+    if not text:
+        return None
+    dims = []
+    for chunk in str(text).lower().replace(",", "x").split("x"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            dims.append(int(chunk))
+        except ValueError:
+            return None
+    return tuple(dims) or None
+
+
+def expected_hw_from_shape(shape_text: str | None) -> tuple[int, int] | None:
+    """从 `input_shape` 推出 (H, W)，**推不出来就返回 None**。
+
+    刻意保守：布局（NCHW / NHWC）是从形状猜的启发式，训练时的真实布局只存在于
+    训练脚本里。所以只在**方形输入**下给出结论——那时两种布局推出同一对 (H, W)：
+
+        NCHW 1x3x640x640  → dims[2] == dims[3] == 640
+        NHWC 1x640x640x3  → dims[1] == dims[2] == 640
+
+    非方形输入直接放弃比对。**宁可不报，也不误报**——一个假的"尺寸不符"会让
+    用户去改本来正确的数据。
+    """
+    dims = parse_input_shape(shape_text)
+    if dims is None or len(dims) != 4:
+        return None
+    if dims[2] == dims[3]:
+        return dims[2], dims[3]
+    if dims[1] == dims[2]:
+        return dims[1], dims[2]
+    return None
+
+
 def _resolutions(payload: dict) -> list[tuple[int, int, int]]:
     out = []
     for item in payload.get("resolutions") or []:

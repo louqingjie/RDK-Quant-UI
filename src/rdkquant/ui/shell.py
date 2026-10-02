@@ -32,7 +32,14 @@ from PySide6.QtWidgets import (
 from ..core.workflow import STAGES, RunContext, Stage, evaluate, next_stage
 from . import icons
 from .metrics import METRICS, font_with_delta
-from .pages import EnvPage, PlaceholderPage, ToolboxPage
+from .pages import (
+    CalibPage,
+    CheckPage,
+    EnvPage,
+    ModelPage,
+    PlaceholderPage,
+    ToolboxPage,
+)
 from .palette import ThemeMode, apply_theme
 from .widgets import LogPanel, StepItem, Stepper, StepState
 
@@ -83,6 +90,11 @@ class AppShell(QMainWindow):
         self.statuses = []
         self._platform_palette = platform_palette
         self._theme = theme
+        #: 后端按环境惰性构建并缓存；环境变了就重建
+        self._backend = None
+        self._env_ready = False
+        #: 需要 Shell 喂 RunContext 的页面，**按流程顺序**存放
+        self.stage_pages: list = []
 
         self.setWindowTitle("RDK 模型量化工具")
         self.resize(1340, 920)
@@ -218,15 +230,66 @@ class AppShell(QMainWindow):
         )
         self.env_page.envChanged.connect(self.refresh_workflow)
 
+        # 已实现的步骤页；其余仍走占位页（占位页会显示"属于哪个里程碑"）
+        factories = {
+            Stage.MODEL: ModelPage,
+            Stage.CHECK: CheckPage,
+            Stage.CALIB: CalibPage,
+        }
+
         for spec in STAGES:
             key = spec.stage.value
             if spec.stage is Stage.ENV:
                 page = self.env_page
             else:
-                page = PlaceholderPage(spec, milestone=STAGE_MILESTONE.get(spec.stage, ""))
+                factory = factories.get(spec.stage)
+                if factory is None:
+                    page = PlaceholderPage(
+                        spec, milestone=STAGE_MILESTONE.get(spec.stage, "")
+                    )
+                else:
+                    page = factory(
+                        spec,
+                        self.workspace,
+                        backend_provider=self.current_backend,
+                        log_panel=self.log_panel,
+                        context_provider=lambda: self.context,
+                    )
+                    page.envChanged.connect(self.refresh_workflow)
+                    self.stage_pages.append(page)
             self._add_page(key, spec.title, STAGE_ICON[spec.stage], page)
 
         self._add_page(TOOLBOX_KEY, "工具箱", "toolbox", ToolboxPage())
+
+    # ------------------------------------------------------------------
+    # 后端
+    # ------------------------------------------------------------------
+    def current_backend(self):
+        """按当前环境给出后端；**环境没就绪返回 None**。
+
+        页面据此禁用动作按钮并显示引导，而不是等用户点了再报错。
+        返回 None 不是错误状态——是"还没准备好"的正常状态。
+        """
+        report = self.env_page.report
+        image = self.context.image_ref
+        if not report or not report.docker.daemon_ok or not image:
+            self._backend = None
+            return None
+
+        spec = self.env_page.selected_spec() or (
+            self.env_page.specs[0] if self.env_page.specs else None
+        )
+        march = getattr(spec, "march", None) or "bayes-e"
+
+        cached = self._backend
+        if cached is None or getattr(cached, "image", None) != image \
+                or getattr(cached, "march", None) != march:
+            from ..core.backends import make_backend
+
+            self._backend = make_backend(
+                workspace=self.workspace, image=image, march=march
+            )
+        return self._backend
 
     def _add_page(self, key: str, title: str, icon_name: str, page: QWidget) -> None:
         item = QListWidgetItem(icons.icon(icon_name, size=18), title)
@@ -258,6 +321,18 @@ class AppShell(QMainWindow):
     def refresh_workflow(self) -> None:
         """重新评估流程并推给步骤条。这是唯一的状态更新入口。"""
         self.env_page.apply_to(self.context)
+        # 必须**按流程顺序**调用：检查页会拿 ctx.model_path 判断"模型换了没有"，
+        # 所以模型页要先把自己的路径写进去。
+        for page in self.stage_pages:
+            page.apply_to(self.context)
+
+        # 环境的"可用/不可用"翻转时才通知页面，避免每次刷新都覆盖用户的选择
+        # （例如检查页里的 march 下拉）。
+        ready = self.current_backend() is not None
+        if ready != self._env_ready:
+            self._env_ready = ready
+            for page in self.stage_pages:
+                page.on_environment_changed()
 
         key = self.current_key()
         current = Stage(key) if key in {s.stage.value for s in STAGES} else None

@@ -336,3 +336,93 @@ def test_cli_subcommands_are_registered(argv):
     with pytest.raises(SystemExit) as excinfo:
         cli.build_parser().parse_args(argv)
     assert excinfo.value.code == 0
+
+
+# --------------------------------------------------------------------------
+# M3 三个步骤页
+#
+# 注意：这些测试刻意复用上面的 shell fixture（它已经把 probe_host 与
+# local_images 打了桩）。自己另建 QApplication 会让整个测试进程炸成
+# access violation —— 实测踩过，所以别在别的文件里再管 QApplication。
+# --------------------------------------------------------------------------
+def test_stage_pages_are_wired_in_flow_order(shell):
+    """顺序必须是 MODEL → CHECK → CALIB。
+
+    检查页靠 `ctx.model_path` 判断"模型换了没有"，所以模型页必须先写路径。
+    顺序反了会让失效判断读到上一轮的值，等于没做。
+    """
+    from rdkquant.ui.pages import CalibPage, CheckPage, ModelPage
+
+    kinds = [type(page) for page in shell.stage_pages]
+    assert kinds == [ModelPage, CheckPage, CalibPage]
+    assert [p.spec.stage for p in shell.stage_pages] == [
+        Stage.MODEL, Stage.CHECK, Stage.CALIB,
+    ]
+
+
+def test_unfinished_steps_still_use_placeholder(shell):
+    from rdkquant.ui.pages import PlaceholderPage
+
+    assert isinstance(shell.pages[Stage.CONVERT.value], PlaceholderPage)
+    assert isinstance(shell.pages[Stage.PERF.value], PlaceholderPage)
+
+
+def test_without_environment_actions_are_disabled_and_explained(shell):
+    """没环境时应当**禁用并引导**，而不是等用户点了再报错。"""
+    model, check, calib = shell.stage_pages
+    assert shell.current_backend() is None
+    assert not model.pick_btn.isEnabled()
+    assert not check.run_btn.isEnabled()
+    assert not calib.scan_btn.isEnabled()
+    assert not calib.build_btn.isEnabled()
+    for page in (model, check, calib):
+        hint = page.environment_hint()
+        assert "环境准备" in hint and "镜像" in hint
+
+
+def test_changing_the_model_invalidates_a_passing_check(shell, tmp_path: Path):
+    """最危险的一类假阳性：换了模型却仍显示"检查通过"。
+
+    门禁一旦放行一个从未被检查过的模型，用户会拿着错误结论往下走。
+    """
+    model, check, _calib = shell.stage_pages
+    old = tmp_path / "run" / "model" / "old.onnx"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"x")
+
+    check.checked_model = old
+    check.passed = True
+    check.log_path = tmp_path / "checker.log"
+    model.model_path = old
+    shell.refresh_workflow()
+    assert shell.context.checker_passed is True
+
+    new = old.parent / "new.onnx"
+    new.write_bytes(b"y")
+    model.model_path = new
+    shell.refresh_workflow()
+    assert shell.context.checker_passed is False, (
+        "换模型后旧结论必须失效，否则门禁会放行一个从未检查过的模型"
+    )
+    assert shell.context.checker_log is None
+
+
+def test_preprocess_toggle_changes_calibration_severity(shell):
+    """同一份数据，打开 preprocess_on 后结论必须从"错误"降级为"警告"。"""
+    from rdkquant.core.findings import LEVEL_ERROR, LEVEL_WARN
+
+    calib = shell.stage_pages[2]
+    calib.payload = {
+        "ok": True, "count": 48, "image_like": 48, "binary_like": 0,
+        "resolutions": [[640, 640, 40], [320, 240, 8]],
+        "duplicates": [], "problems": [], "warnings": [],
+    }
+    calib.preprocess_box.setChecked(False)
+    calib._evaluate()
+    assert calib.verdict.blocked
+    assert any(f.level == LEVEL_ERROR for f in calib.verdict.findings)
+
+    calib.preprocess_box.setChecked(True)
+    calib._evaluate()
+    assert not calib.verdict.blocked
+    assert any(f.level == LEVEL_WARN for f in calib.verdict.findings)

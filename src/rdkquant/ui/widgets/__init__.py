@@ -18,6 +18,7 @@ from .metrictile import MetricTile
 from .statuspill import StatusPill, Tone
 from .stepper import StepItem, Stepper, StepState
 from .tablemodel import TableModel, fit_columns_to_content, make_table
+from .thumbnailgrid import ThumbnailGrid
 
 __all__ = [
     "Card",
@@ -32,6 +33,7 @@ __all__ = [
     "StepState",
     "Stepper",
     "TableModel",
+    "ThumbnailGrid",
     "Tone",
     "fit_columns_to_content",
     "make_table",
