@@ -538,3 +538,36 @@ def test_model_page_runs_fit_columns_after_data(shell):
             f"{name} 上的 fit_columns_to_content 没跑到"
         )
     assert model_page.findings_view.horizontalHeader().stretchLastSection() is False
+
+
+# --------------------------------------------------------------------------
+# Ctrl+C
+# --------------------------------------------------------------------------
+def test_interrupt_handler_installs_a_heartbeat_timer(qapp, monkeypatch):
+    """光装 signal handler 是没用的，必须配一个把控制权交还解释器的定时器。
+
+    端到端行为在 test_interrupt.py 里（那里把真程序当子进程起、发 SIGINT）。
+    这里只守住"两件事都装了"这个结构，因为它是那次修复的全部内容。
+    """
+    import signal
+
+    from rdkquant.ui.app import _INTERRUPT_TICK_MS, _install_interrupt_handler
+
+    original = signal.getsignal(signal.SIGINT)
+    try:
+        timer = _install_interrupt_handler(qapp)
+        assert timer.isActive(), "心跳定时器必须是启动状态，否则 handler 永远不会被调用"
+        assert 0 < timer.interval() <= 500, (
+            f"间隔应当短到用户按下去就有反应，实际 {timer.interval()}ms"
+        )
+        assert timer.interval() == _INTERRUPT_TICK_MS
+        assert callable(signal.getsignal(signal.SIGINT)), "SIGINT handler 必须装上"
+
+        # 第一次按下应当走整洁退出
+        quit_calls = []
+        monkeypatch.setattr(qapp, "quit", lambda: quit_calls.append(True))
+        signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        assert quit_calls == [True]
+        timer.stop()
+    finally:
+        signal.signal(signal.SIGINT, original)
