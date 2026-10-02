@@ -480,3 +480,61 @@ def test_backend_is_cached_across_refreshes(shell, monkeypatch, tmp_path: Path):
 
     shell.refresh_workflow()
     assert shell.current_backend() is first, "环境没变就该复用同一个后端"
+
+
+# --------------------------------------------------------------------------
+# 表格接线
+#
+# 这是一条**不报错**的坑，必须用测试守住：make_table() 的第一个参数是
+# **表头列表**而不是模型。传成模型的话视图上不会挂任何模型 →
+# columnCount() 为 0 → fit_columns_to_content() 直接早退 → 渲染出一张没有表头、
+# 没有行、列宽全 0 的空表格。数据在 model 里明明是对的，界面就是空白。
+# M3 的四张表全踩了，只有真机截图才看得出来。
+# --------------------------------------------------------------------------
+def test_every_stage_table_is_wired_to_a_model(shell):
+    from PySide6.QtWidgets import QTableView
+
+    checked = 0
+    for page in shell.stage_pages:
+        for view in page.findChildren(QTableView):
+            model = view.model()
+            assert model is not None, f"{type(page).__name__} 里有表格没挂模型"
+            assert model.columnCount() > 0, (
+                f"{type(page).__name__} 的表格列数为 0 —— 多半是把模型当成表头传给了 make_table()"
+            )
+            checked += 1
+    assert checked >= 4, f"应当检查到多张表格，实际只有 {checked} 张"
+
+
+def test_findings_table_is_wired(shell):
+    """结论表在三个页面上都有，最容易漏。"""
+    for page in shell.stage_pages:
+        model = page.findings_view.model()
+        assert model is not None
+        assert model.columnCount() == 3
+
+
+def test_model_page_runs_fit_columns_after_data(shell):
+    """填完数据后 fit_columns_to_content 必须真的跑到。
+
+    它的第一个动作是 `setStretchLastSection(False)`，所以拿这个当判据是确定的；
+    改用 columnWidth() 判断不可靠——视图没轮到布局时宽度本来就是 0。
+    """
+    model_page = shell.stage_pages[0]
+    model_page._on_inspected({
+        "ok": True, "onnx": "1.12.0", "ir_version": 8, "opset": 11,
+        "inputs": [{"name": "images", "shape": [1, 3, 640, 640],
+                    "dtype": "float16", "dynamic": False}],
+        "outputs": [{"name": "output", "shape": [1, 25200, 22],
+                     "dtype": "float32", "dynamic": False}],
+        "op_histogram": [["Conv", 120], ["Mul", 40]],
+        "problems": [], "warnings": [],
+    })
+    assert model_page.io_model.rowCount() == 2
+    assert model_page.io_model.row_text(0)[0] == "images"
+    for name in ("io_view", "ops_view", "params_view"):
+        view = getattr(model_page, name)
+        assert view.horizontalHeader().stretchLastSection() is False, (
+            f"{name} 上的 fit_columns_to_content 没跑到"
+        )
+    assert model_page.findings_view.horizontalHeader().stretchLastSection() is False

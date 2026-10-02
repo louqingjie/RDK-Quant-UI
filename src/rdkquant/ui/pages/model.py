@@ -78,15 +78,13 @@ class ModelPage(StagePage):
 
         # ---- 输入输出 ----
         io_card = Card("输入 / 输出")
-        self.io_model = TableModel(IO_HEADERS)
-        self.io_view = make_table(self.io_model)
+        self.io_model, self.io_view = self.make_table_with(IO_HEADERS)
         io_card.add(self.io_view)
         self.body.addWidget(io_card)
 
         # ---- 算子分布 ----
         ops_card = Card("算子分布", "按出现次数排序，前 15 项")
-        self.ops_model = TableModel(OP_HEADERS)
-        self.ops_view = make_table(self.ops_model)
+        self.ops_model, self.ops_view = self.make_table_with(OP_HEADERS)
         ops_card.add(self.ops_view)
         self.body.addWidget(ops_card)
 
@@ -96,8 +94,7 @@ class ModelPage(StagePage):
             "⚠️ 形状可以读出来，但**布局与通道顺序读不出来**——它们只存在于训练"
             "脚本里。下表只是按形状给出的建议，第 4 步必须由你确认。"
         ))
-        self.params_model = TableModel(PARAM_HEADERS)
-        self.params_view = make_table(self.params_model)
+        self.params_model, self.params_view = self.make_table_with(PARAM_HEADERS)
         params_card.add(self.params_view)
         self.body.addWidget(params_card)
 

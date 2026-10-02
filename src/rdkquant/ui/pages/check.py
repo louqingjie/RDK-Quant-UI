@@ -87,8 +87,7 @@ class CheckPage(StagePage):
         self.body.addWidget(overview)
 
         nodes_card = Card("节点分布")
-        self.nodes_model = TableModel(NODE_HEADERS)
-        self.nodes_view = make_table(self.nodes_model)
+        self.nodes_model, self.nodes_view = self.make_table_with(NODE_HEADERS)
         nodes_card.add(self.nodes_view)
         self.body.addWidget(nodes_card)
 

@@ -126,13 +126,32 @@ class StagePage(QWidget):
     # ------------------------------------------------------------------
     def add_findings_card(self, subtitle: str = "") -> Card:
         card = Card("结论", subtitle, official_ref=self.spec.official_ref)
-        self.findings_model = TableModel(["级别", "说明", "建议"])
-        self.findings_view = make_table(self.findings_model)
+        self.findings_model, self.findings_view = self.make_table_with(
+            ["级别", "说明", "建议"]
+        )
         card.add(self.findings_view)
         self.findings_card = card
         self.body.addWidget(card)
         self.set_findings([])
         return card
+
+    @staticmethod
+    def make_table_with(headers) -> tuple[TableModel, QTableView]:
+        """建一张**正确接线**的表格，返回 `(model, view)`。
+
+        为什么要这个辅助函数：`make_table()` 的第一个参数是**表头列表**，不是模型。
+        传成模型的话视图上不会挂任何模型 → `columnCount()` 为 0 →
+        `fit_columns_to_content()` 直接早退 → 最后渲染出一张没有表头、没有行、
+        列宽全 0 的空表格。
+
+        这个坑 M3 的三个页面全踩了（四张表全是空的），而且**不报任何错**——
+        数据在 model 里明明是对的。所以把它固化成这个函数，别再手写序对。
+        """
+        headers = list(headers)
+        model = TableModel(headers)
+        view = make_table(headers)
+        view.setModel(model)
+        return model, view
 
     def set_findings(self, findings) -> None:
         self._findings = list(findings)
