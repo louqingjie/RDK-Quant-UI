@@ -363,13 +363,28 @@ def test_version_lt(version, target, expected):
     assert version_lt(version, target) is expected
 
 
-def test_probe_host_never_raises_and_reports_something(tmp_path: Path):
+def test_probe_host_never_raises_and_reports_something(tmp_path: Path, monkeypatch):
+    """体检必须总能跑完并给出结论——**不依赖这台机器装没装 Docker、磁盘够不够**。
+
+    原来这条直接断言"没装 Docker 就应当给出 FAIL 或 can_quantize"，把测试绑在了
+    开发机的真实状态上。在用户的 Windows 机器上就不成立了：Docker Desktop 装着
+    （所以不是 MISSING）、磁盘只剩 3.4 GB（所以 can_quantize 是 False）——
+    两个条件都不满足就挂。而 Docker 守护进程偶尔响应慢时又会通过，于是表现为
+    **环境相关的偶发失败**。测试不该有这种脾气。
+    """
+    import shutil
+
+    from rdkquant.core.probe import GB
+
+    # 把磁盘固定成充足，去掉环境里最容易变的那一项
+    monkeypatch.setattr(
+        shutil, "disk_usage",
+        lambda _p: shutil._ntuple_diskusage(1000 * GB, 500 * GB, 500 * GB),
+    )
     report = probe_host(tmp_path)
     assert report.platform
     assert report.findings, "体检至少要给出结论"
-    # 本机没装 Docker，应当给出明确的 FAIL 而不是静默通过
-    codes = {f.code for f in report.findings}
-    assert "DOCKER_CLI_MISSING" in codes or "DOCKER_DAEMON_DOWN" in codes or report.can_quantize
+    assert isinstance(report.can_quantize, bool)
     assert isinstance(report.to_dict(), dict)
 
 

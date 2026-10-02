@@ -26,6 +26,11 @@ from .findings import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, Finding  # noqa: F401
 
 GB = 1024 ** 3
 
+#: 不指定目标镜像时的磁盘底线。
+#: 最小值来自最小的 CPU 镜像：1.69 GB 压缩包，下载 + 解压经验上要 2.2 倍 ≈ 3.7 GB；
+#: 再加校准数据、量化产物与日志。低于这个数**什么都做不了**，所以判 ERROR 而不是 WARN。
+WORKABLE_DISK_BYTES = 8 * GB
+
 
 @dataclass(frozen=True)
 class DockerStatus:
@@ -290,13 +295,36 @@ def probe_host(
 
     # --- Docker ---
     if report.docker.cli_path is None:
-        hint = (
-            "Windows：安装 Docker Desktop（会自动装好 WSL2），或先 `wsl --install` "
-            "再在发行版里装 docker engine。"
-            if report.is_windows
-            else "Linux：sudo apt install docker.io 或按官方文档装 docker-ce，并把当前用户加入 docker 组。"
-        )
-        f.append(Finding(LEVEL_ERROR, "DOCKER_CLI_MISSING", "未安装 Docker 命令行", hint))
+        if report.is_windows and report.wsl_distros:
+            # **已经有 WSL2 的时候不能建议装 Docker Desktop。** 这是实测出来的：
+            # Docker Desktop 有自己独立的守护进程，已经 `docker load` 进 WSL 的
+            # 1.69 GB 镜像要重新导一遍；而且大公司用 Docker Desktop 需要订阅，
+            # 而 Linux 上的 Docker Engine 是 Apache-2.0 免费的。
+            # 界面还能靠 WSLg 直接显示在 Windows 桌面上，不需要 X 服务器。
+            message = (
+                "Windows 原生环境没有 Docker —— 本工具在 Windows 上应当在 WSL2 里运行"
+                f"（已检测到：{'、'.join(report.wsl_distros)}）"
+            )
+            hint = (
+                "在 WSL 里跑：wsl → cd ~/src/rdk-quant → bash ./scripts/dev-setup.sh --run。"
+                "**不要装 Docker Desktop**：它有自己的守护进程，镜像得重新导一遍，"
+                "而且大公司用它需要订阅（Docker Engine 是 Apache-2.0 免费的）。"
+                "界面由 WSLg 直接显示在 Windows 桌面上，不需要 X 服务器。"
+            )
+        elif report.is_windows:
+            message = "未安装 Docker，也没有 WSL2 发行版"
+            hint = (
+                "管理员 PowerShell 执行 `wsl --install` 并重启，然后在发行版里 "
+                "`sudo apt install docker.io`。"
+                "不推荐 Docker Desktop：订阅限制 + 镜像要单独再导一遍。"
+            )
+        else:
+            message = "未安装 Docker 命令行"
+            hint = (
+                "Linux：sudo apt install docker.io 或按官方文档装 docker-ce，"
+                "并把当前用户加入 docker 组。"
+            )
+        f.append(Finding(LEVEL_ERROR, "DOCKER_CLI_MISSING", message, hint))
     elif not report.docker.daemon_ok:
         hint = (
             "启动 Docker Desktop，确认右下角鲸鱼图标变绿；若刚装完 WSL2，需要重启一次。"
@@ -411,6 +439,18 @@ def probe_host(
             f.append(
                 Finding(LEVEL_OK, "DISK_OK", f"磁盘充足，剩余 {free / GB:.1f} GB")
             )
+    elif free < WORKABLE_DISK_BYTES:
+        # 不知道目标镜像时也要拦住明显不够的情况。原来的写法在这里只给 WARN，
+        # 于是 C: 只剩 1.8 GB 时结论仍是"可以执行量化"——实测在真机上撞到。
+        f.append(
+            Finding(
+                LEVEL_ERROR,
+                "DISK_INSUFFICIENT",
+                f"磁盘空间不足：{report.disk.path} 只剩 {free / GB:.1f} GB，"
+                f"而最小的 CPU 镜像（1.7 GB 压缩包）下载 + 解压就要约 3.7 GB",
+                "清理磁盘，或把 Docker 的镜像存储目录改到大容量分区。",
+            )
+        )
     elif free < 20 * GB:
         f.append(
             Finding(
