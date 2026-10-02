@@ -88,11 +88,12 @@ class AppShell(QMainWindow):
         self.workspace = Path(workspace)
         self.context = RunContext()
         self.statuses = []
+        #: 后端按环境惰性构建并缓存；环境变了才重建
+        self._backend = None
+        self._backend_key: tuple[str, str] | None = None
+        self._env_ready = False
         self._platform_palette = platform_palette
         self._theme = theme
-        #: 后端按环境惰性构建并缓存；环境变了就重建
-        self._backend = None
-        self._env_ready = False
         #: 需要 Shell 喂 RunContext 的页面，**按流程顺序**存放
         self.stage_pages: list = []
 
@@ -282,13 +283,19 @@ class AppShell(QMainWindow):
         march = getattr(spec, "march", None) or "bayes-e"
 
         cached = self._backend
-        if cached is None or getattr(cached, "image", None) != image \
-                or getattr(cached, "march", None) != march:
-            from ..core.backends import make_backend
+        # 用显式的缓存键，**不要**回读后端对象的属性：MockBackend 根本没有
+        # image 属性，`getattr(cached, "image", None) != image` 会恒为真，
+        # 于是每次刷新都重建后端（实测被测试抓到）。
+        key = (image, march)
+        if cached is None or self._backend_key != key:
+            from ..core.backends import Workspace, make_backend
 
+            # self.workspace 是 Path（给页面拼路径用的），而 make_backend 要的是
+            # 带 ensure()/rel() 的 Workspace。别直接把 Path 传下去。
             self._backend = make_backend(
-                workspace=self.workspace, image=image, march=march
+                workspace=Workspace(self.workspace), image=image, march=march
             )
+            self._backend_key = key
         return self._backend
 
     def _add_page(self, key: str, title: str, icon_name: str, page: QWidget) -> None:

@@ -426,3 +426,57 @@ def test_preprocess_toggle_changes_calibration_severity(shell):
     calib._evaluate()
     assert not calib.verdict.blocked
     assert any(f.level == LEVEL_WARN for f in calib.verdict.findings)
+
+
+def test_backend_is_built_when_environment_is_ready(shell, monkeypatch, tmp_path: Path):
+    """环境就绪时必须真的把后端建出来。
+
+    这是回归测试：`current_backend()` 在没有 Docker 或没导镜像时会**提前返回
+    None**，于是所有既有测试都从没走到 `make_backend` —— 结果里面把 `Path`
+    当 `Workspace` 传了进去（`Path` 没有 `ensure()`），只有在真实机器上
+    "Docker 在跑 + 镜像已导入"时才会炸。用户第一次跑真实环境就撞上了。
+
+    教训：**提前返回的分支会让后面的代码完全没被测到**。所以这条测试专门把
+    环境伪装成就绪，逼着它走完那条路。
+    """
+    import rdkquant.ui.pages.env as env_mod
+
+    report = _fake_report()
+    report.docker = DockerStatus(
+        cli_path="/usr/bin/docker", cli_version="29.1.3",
+        daemon_ok=True, daemon_version="29.1.3",
+    )
+    shell.env_page.report = report
+    monkeypatch.setattr(
+        env_mod.img, "find_loaded",
+        lambda *a, **k: "openexplorer/ai_toolchain_ubuntu_20_x5_cpu:v1.2.8-py310",
+    )
+
+    # 不该抛异常
+    shell.refresh_workflow()
+    backend = shell.current_backend()
+    assert backend is not None, "环境就绪时应当给出后端"
+    assert backend.workspace.root == (tmp_path / "run"), (
+        "后端拿到的必须是 Workspace（带 ensure/rel），而不是裸 Path"
+    )
+    assert hasattr(backend.workspace, "ensure")
+    assert hasattr(backend.workspace, "rel")
+
+
+def test_backend_is_cached_across_refreshes(shell, monkeypatch, tmp_path: Path):
+    """环境没变时不该每次刷新都重建后端（重建会丢掉容器配置）。"""
+    import rdkquant.ui.pages.env as env_mod
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    shell.env_page.report = report
+    monkeypatch.setattr(env_mod.img, "find_loaded", lambda *a, **k: "img:tag")
+
+    # 先刷新一次让 context.image_ref 填上（它由 env 页在 refresh 时写入），
+    # 再取后端——顺序反了会拿到 None，测的就不是缓存了。
+    shell.refresh_workflow()
+    first = shell.current_backend()
+    assert first is not None
+
+    shell.refresh_workflow()
+    assert shell.current_backend() is first, "环境没变就该复用同一个后端"
