@@ -153,19 +153,40 @@ class DockerBackend:
 # --------------------------------------------------------------------------
 # 假后端：让 UI 在没有 Docker 的机器上也能开发完
 # --------------------------------------------------------------------------
+# 这段假输出**刻意模仿真实格式**（实测自 X5 CPU 容器的 hb_mapper_checker.log）：
+#   * 行首是 `时间戳 file: … func: … line No: N` 前缀
+#   * 表头是 `Node ON Subgraph Type Cosine Similarity Threshold DataType`
+#   * **`ON` 列装的是 BPU/CPU**
+#   * 表格后面紧跟着 `The quantized model output:` 这类句子
+# 只有这样 Mock 后端才能真正压到解析器的容错路径；用简化格式写等于没测。
 _MOCK_CHECK = """\
-[INFO] hb_mapper checker 开始
-[INFO] model_parameters.march = {march}
-[INFO] 正在解析 ONNX 图结构 ...
-[INFO] The converted model node information:
-[INFO]       Node         Type       Device
-[INFO]       Conv_0       Conv       BPU
-[INFO]       Conv_2       Conv       BPU
-[INFO]       Sigmoid_55   Sigmoid    BPU
-[INFO]       Softmax_91   Softmax    CPU     <-- 回落到 CPU，可能影响性能
-[INFO]       Resize_118   Resize     CPU
-[WARN] 检测到 2 个算子运行在 CPU 上，建议检查 node_info 配置
-[SUCCESS] checker 通过
+2026-01-01 00:00:00,001 INFO log will be stored in hb_mapper_checker.log
+2026-01-01 00:00:00,001 INFO Start hb_mapper....
+2026-01-01 00:00:00,002 INFO hbdk version 3.49.15
+2026-01-01 00:00:00,002 INFO horizon_nn version 1.1.0
+2026-01-01 00:00:00,002 INFO hb_mapper version 1.24.3
+2026-01-01 00:00:00,003 INFO Model type: onnx
+2026-01-01 00:00:00,004 INFO The specified model compilation architecture: {march}.
+2026-01-01 00:00:00,005 INFO Input ONNX Model Information:
+ONNX IR version:          8
+Opset version:            ['ai.onnx v11']
+Graph input:
+    images:               shape=[1, 3, 640, 640], dtype=FLOAT32
+Graph output:
+    output0:              shape=[1, 84, 8400], dtype=FLOAT32
+2026-01-01 00:00:00,010 INFO The main quantized node information:
+=====================================================================================
+Node        ON   Subgraph  Type              Cosine Similarity  Threshold  DataType  
+-------------------------------------------------------------------------------------
+Conv_0      BPU  id(0)     HzSQuantizedConv  0.9992             1.0        int8
+Conv_2      BPU  id(0)     HzSQuantizedConv  0.9985             1.0        int8
+Softmax_91  CPU  id(0)     Softmax           0.9623             1.0        int8
+Resize_118  CPU  id(1)     Resize            0.9401             1.0        int8
+2026-01-01 00:00:00,020 INFO The quantized model output:
+============
+Output      
+------------
+2026-01-01 00:00:00,021 INFO End model checking....
 """
 
 _MOCK_COMPILE = """\

@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from rdkquant.core.logparse import (
@@ -46,6 +48,54 @@ def test_strip_log_prefix_variants():
     assert strip_log_prefix("") == ""
 
 
+def test_strip_log_prefix_handles_real_logfile_format():
+    """实测自 hb_mapper_checker.log 的真实前缀：
+    时间戳 + `file: … func: … line No: N `。原来的实现完全处理不了。"""
+    line = ("2026-10-02 19:41:44,845 file: print_info_dict.py "
+            "func: print_info_dict line No: 72 The main quantized node information:")
+    assert strip_log_prefix(line) == "The main quantized node information:"
+
+
+def test_strip_log_prefix_handles_console_ansi():
+    """控制台输出带 ANSI 颜色，日志文件里没有。不剥掉会污染解析。"""
+    line = "2026-10-02 19:41:44,543 \x1b[92mINFO\x1b[0m Start hb_mapper...."
+    assert strip_log_prefix(line) == "Start hb_mapper...."
+
+
+# --------------------------------------------------------------------------
+# 真实夹具：这份文件是导入 X5 CPU 镜像后从容器里抓出来的
+# --------------------------------------------------------------------------
+REAL_LOG = Path(__file__).parent / "fixtures" / "checker_real.log"
+
+
+@pytest.mark.skipif(not REAL_LOG.is_file(), reason="缺少真实夹具")
+def test_parses_the_real_checker_log():
+    lines = REAL_LOG.read_text(encoding="utf-8").splitlines()
+    report = parse_checker(lines)
+
+    assert report is not None, "真实日志必须能解析出来"
+    assert report.saw_node_table
+    assert [n.name for n in report.nodes] == ["Conv_0"]
+    assert report.nodes[0].device == "BPU"
+    assert report.nodes[0].type == "HzSQuantizedConv"
+    assert report.nodes[0].subgraph == "id(0)"
+    assert report.subgraph_count == 1
+    assert report.cpu_nodes == ()
+
+
+@pytest.mark.skipif(not REAL_LOG.is_file(), reason="缺少真实夹具")
+def test_real_log_tail_is_not_turned_into_nodes():
+    """真实的表格后面紧跟着 `The quantized model output:`，它的列数恰好也落进
+    "列数区间"里——只靠列数过滤会多出一个名叫 "The" 的假节点。
+    真正管用的是"每行的设备列必须是 BPU/CPU"这条。"""
+    lines = REAL_LOG.read_text(encoding="utf-8").splitlines()
+    report = parse_checker(lines)
+    names = [n.name for n in report.nodes]
+    assert "The" not in names
+    assert "Output" not in names
+    assert len(names) == 1
+
+
 def test_parses_mock_table():
     report = parse_checker(MOCK_CHECKER.splitlines())
     assert report is not None
@@ -78,22 +128,24 @@ def test_inline_comment_does_not_break_device_column():
     assert softmax.on_cpu and not softmax.on_bpu
 
 
-def test_parses_makertbin_style_seven_column_table():
-    """makertbin 的余弦相似度表列更多（Node/ON/Subgraph/Type/Cosine/Threshold）。
-    同一个解析器要能吃下来，M4 会直接复用它。"""
+def test_parses_makertbin_style_table_with_real_on_semantics():
+    """列更多的表（Node/ON/Subgraph/Type/Cosine/Threshold/DataType）。
+    实测确认 **ON 列装的就是 BPU/CPU**，不是字面量 "ON"——M4 会复用这个解析器。"""
     text = "\n".join([
-        "[INFO] The converted model node information:",
-        "Node         ON    Subgraph       Type      Cosine Similarity   Threshold",
-        "Conv_0       ON    subgraph_0     Conv      0.9999              0.8",
-        "Softmax_91   ON    subgraph_1     Softmax   0.8100              0.8",
+        "[INFO] The main quantized node information:",
+        "Node        ON   Subgraph  Type              Cosine Similarity  Threshold  DataType",
+        "Conv_0      BPU  id(0)     HzSQuantizedConv  0.9999             1.0        int8",
+        "Softmax_91  CPU  id(1)     Softmax           0.8100             1.0        int8",
     ])
     report = parse_checker(text.splitlines())
     assert report is not None
     assert len(report.nodes) == 2
+    assert report.nodes[0].device == "BPU"
+    assert report.nodes[0].subgraph == "id(0)"
+    assert report.nodes[0].type == "HzSQuantizedConv"
+    assert report.nodes[1].device == "CPU"
+    assert report.cpu_nodes == ("Softmax_91",)
     assert report.subgraph_count == 2
-    assert report.nodes[0].on == "ON"
-    assert report.nodes[0].subgraph == "subgraph_0"
-    assert report.nodes[1].device == ""  # 这张表没有 device 列，末列是阈值
 
 
 def test_no_header_returns_none():

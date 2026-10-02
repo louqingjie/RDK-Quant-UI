@@ -411,7 +411,18 @@ def test_mock_backend_end_to_end(tmp_path: Path):
 
     lines: list[str] = []
     assert backend.check(ws.model_dir / "m.onnx", "bayes-e", on_line=lines.append) == 0
-    assert any("checker 通过" in line for line in lines)
+    text = "\n".join(lines)
+    # 假输出刻意模仿真实格式，所以要按真实格式断言（见 backends._MOCK_CHECK）
+    assert "The main quantized node information:" in text
+    assert "bayes-e" in text
+    # 而且要能被解析器吃下来——否则 Mock 路径测不到解析器的容错逻辑
+    from rdkquant.core.logparse import parse_checker
+
+    report = parse_checker(lines)
+    assert report is not None
+    assert [n.name for n in report.nodes] == [
+        "Conv_0", "Conv_2", "Softmax_91", "Resize_118",
+    ]
 
     lines.clear()
     assert backend.compile(on_line=lines.append) == 0

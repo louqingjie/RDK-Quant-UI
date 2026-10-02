@@ -17,6 +17,16 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+#: 控制台输出带 ANSI 颜色（日志文件里没有）。不剥掉的话 `\x1b[92mINFO\x1b[0m` 会污染解析。
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+#: 真实前缀带毫秒时间戳：`2026-10-02 19:41:44,845 ...`
+_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}[,.]\d+\s+")
+
+#: 日志文件里时间戳之后还有一段来源信息：`file: x.py func: y line No: 72 `
+#: 这一段是**真实抓到的**（hb_mapper_checker.log），不是我猜的。
+_FILE_PREFIX_RE = re.compile(r"^file:.*?line No:\s*\d+\s+")
+
 #: 行首的日志级别标记：`[INFO]` / `INFO:` / `INFO ` 等
 _PREFIX_RE = re.compile(
     r"^\s*(?:\[[A-Za-z]+\]|(?:DEBUG|INFO|WARN|WARNING|ERROR|SUCCESS|FAIL|OK)\b:?)[\s:]*",
@@ -55,13 +65,27 @@ def _has_cjk(text: str) -> bool:
 
 
 def strip_log_prefix(line: str) -> str:
-    """去掉行首的日志级别标记，可能有多层。"""
-    result = line.rstrip("\r\n")
-    for _ in range(3):
-        stripped = _PREFIX_RE.sub("", result, count=1)
-        if stripped == result:
+    """剥掉日志前缀，可能有多层。
+
+    真实格式（实测自 hb_mapper_checker.log）：
+
+        2026-10-02 19:41:44,845 file: print_info_dict.py func: print_info_dict line No: 72 The main quantized ...
+
+    控制台上则是另一种（带 ANSI 颜色）：
+
+        2026-10-02 19:41:44,543 \\x1b[92mINFO\\x1b[0m Start hb_mapper....
+
+    两种都要能处理，所以这里是"循环剥到不动为止"而不是单条正则。
+    """
+    result = _ANSI_RE.sub("", line.rstrip("\r\n"))
+    for _ in range(4):
+        before = result
+        result = _TIMESTAMP_RE.sub("", result, count=1)
+        result = _FILE_PREFIX_RE.sub("", result, count=1)
+        result = _PREFIX_RE.sub("", result, count=1)
+        result = result.lstrip()
+        if result == before:
             break
-        result = stripped
     return result
 
 
@@ -162,9 +186,14 @@ def parse_checker(lines: Iterable[str]) -> CheckerReport | None:
                 header_map = _map_header(cells)
                 header_width = len(cells)
                 lower_bound = min(3, header_width)
-                if "device" not in header_map and header_width >= 3:
-                    # 没有显式 device 列时，把最后一列当作设备
-                    header_map["device"] = header_width - 1
+                # 设备列的位置，按可靠性依次回退：
+                #   1) 显式的 Device 列
+                #   2) **真实格式里 `ON` 列装的就是 BPU/CPU**（实测自 X5 容器的
+                #      `Node ON Subgraph Type Cosine Similarity Threshold DataType`
+                #      —— 官方口径里 ON 表示"算子是否跑在 BPU 上"）
+                #   3) 最后一列
+                if "device" not in header_map:
+                    header_map["device"] = header_map.get("on", header_width - 1)
             continue
 
         # 表头之后只认"列数落在合理区间"的行。
@@ -187,13 +216,22 @@ def parse_checker(lines: Iterable[str]) -> CheckerReport | None:
         if cells[0].lower() in ("node", "total", "summary"):
             continue
 
+        device_index = header_map["device"]
+        device = _normalize_device(cells[device_index] if device_index < len(cells) else "")
+        if not device:
+            # **每一行的设备列必然是可识别的 BPU/CPU**（真实格式如此）。
+            # 这条比列数区间更硬，干净地滤掉了表格后面的
+            # `The quantized model output:` —— 它的列数恰好也落进区间。
+            if nodes:
+                break
+            continue
+
         def cell(key: str) -> str:
             index = header_map.get(key)
             if index is None or index >= len(cells):
                 return ""
             return _clean_cell(cells[index])
 
-        device = _normalize_device(cell("device") or cells[-1])
         node = CheckerNode(
             name=_clean_cell(cells[header_map.get("name", 0)]),
             on=cell("on"),
