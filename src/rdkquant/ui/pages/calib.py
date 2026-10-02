@@ -65,6 +65,10 @@ class CalibPage(StagePage):
         self.directory = self.workspace / "cal_images"
         self.payload: dict | None = None
         self.verdict = None
+        #: 扫描时把图片收进工作区后的那条路径（容器能看到的就是它）。
+        #: **生成必须用它，不能用 self.directory** —— 那是用户选的原始路径，
+        #: 可能在工作区外，容器根本看不到（实测踩过）。
+        self._staged: Path | None = None
 
         # ---- 目录 ----
         card = Card("校准数据目录", official_ref=self.spec.official_ref)
@@ -301,6 +305,9 @@ class CalibPage(StagePage):
 
     def _on_scanned(self, payload: dict) -> None:
         self.payload = payload
+        staged = payload.get("_staged")
+        if staged:
+            self._staged = Path(staged)
         self._evaluate()
         self.grid.set_images(self.workspace / THUMB_SUBDIR)
         self.envChanged.emit()
@@ -394,7 +401,7 @@ class CalibPage(StagePage):
             count=self.count_box.value(),
         )
         out = self.workspace / spec.output_dir_name
-        source = self.directory
+        source = self._staged or (self.workspace / "cal_images")
         self.build_label.setText("生成中…")
 
         def job(emit_line, emit_progress, cancel):
@@ -413,10 +420,14 @@ class CalibPage(StagePage):
     def _on_built(self, payload: dict) -> None:
         if not payload.get("ok"):
             self.build_label.setText(f"生成失败：{payload.get('error')}")
-            self.set_findings([Finding(
+            # **追加而不是替换**：扫描出来的结论（分辨率、张数、曝光）仍然有效，
+            # 一次生成失败不该把它们全冲掉。
+            findings = list(self.verdict.findings) if self.verdict else []
+            findings.append(Finding(
                 LEVEL_ERROR, "CALIB_BUILD_FAILED",
                 str(payload.get("error") or "生成校准数据失败"),
-            )])
+            ))
+            self.set_findings(findings)
             self.envChanged.emit()
             return
 
