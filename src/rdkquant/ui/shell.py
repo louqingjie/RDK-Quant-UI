@@ -411,7 +411,25 @@ class AppShell(QMainWindow):
 
     # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.env_page.tasks.wait_all()
+        """关窗前等所有后台任务收尾。
+
+        **必须遍历窗口里所有的 TaskRunner，不能只等 env_page 那一个。** 三个步骤页
+        各有自己的 runner（在 StagePage 里建的），原来只等了 env_page，于是那些
+        QThread 还活着时宿主对象就被回收——在 Windows 上表现为堆损坏
+        （退出码 0xC0000374）。
+
+        实测定位：所有用例都跑完、一个失败都没有，但进程崩在退出那一刻，
+        pytest 连汇总行都打不出来。真实用户那边同样的动作是"任务跑着的时候关窗口"。
+
+        先统一取消再统一等待：不然用户在长任务（比如量化编译）中途关窗口会卡住。
+        """
+        from .workers import TaskRunner
+
+        runners = self.findChildren(TaskRunner)
+        for runner in runners:
+            runner.cancel_all()
+        for runner in runners:
+            runner.wait_all()
         super().closeEvent(event)
 
 

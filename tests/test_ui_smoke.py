@@ -66,6 +66,11 @@ def shell(qapp, monkeypatch, tmp_path: Path):
     window.show()
     qapp.processEvents()
     yield window
+
+    # 只调 close() 就够——AppShell.closeEvent 会等所有 TaskRunner 收尾。
+    # 保留这条注释是因为**这里曾经坏过**：closeEvent 只等了 env_page.tasks，
+    # 三个步骤页各自的 runner 全漏了，导致 QThread 还活着时宿主对象被回收，
+    # Windows 上堆损坏（0xC0000374），进程崩在退出那刻、pytest 汇总行都打不出来。
     window.close()
 
 
