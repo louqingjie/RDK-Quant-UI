@@ -87,6 +87,28 @@ def test_scan_accepts_correctly_sized_binaries(tmp_path: Path):
     assert not payload["problems"], payload["problems"]
 
 
+@pytest.mark.parametrize("shape", [
+    "1x3x64x64",          # 规范写法
+    "1×3×64×64",          # 全角乘号 —— 界面上显示用的就是它
+    "1X3X64X64",
+    "1*3*64*64",
+    "1,3,64,64",
+])
+def test_scan_accepts_every_shape_spelling(tmp_path: Path, shape: str):
+    """形状的写法要宽容。
+
+    **实测踩过**：界面把形状格式化成 `1×3×640×640`（全角乘号，更好看），而探针只按
+    ASCII `x` 切分 → 解析失败静默返回 None，字节数校验被悄悄跳过。
+    """
+    (tmp_path / "0.bin").write_bytes(b"\x00" * SHAPE_F32_BYTES)
+    payload = run_probe("calib-scan", str(tmp_path), "--shape", shape,
+                        "--dtype", "float32")
+    assert payload["ok"] is True
+    assert not payload["problems"], (
+        f"{shape!r} 没被解析出来（本该核对字节数，实际 problems={payload['problems']}）"
+    )
+
+
 def test_scan_detects_wrong_sized_binary(tmp_path: Path):
     """多 128 字节（= .npy 文件头）正是实验里失败的那种输入，必须提前抓出来。"""
     (tmp_path / "0.bin").write_bytes(b"\x00" * SHAPE_F32_BYTES)

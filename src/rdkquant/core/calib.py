@@ -101,6 +101,20 @@ def expected_hw_from_shape(shape_text: str | None) -> tuple[int, int] | None:
     return None
 
 
+def _describe_resolutions(resolutions, limit: int = 5) -> str:
+    """把分辨率分布说成人话。
+
+    **只列前几个**：实测过一个数据集有 1474 种分辨率，全列出来这条结论上万字符，
+    会把表格撑爆，而且对用户毫无帮助——他需要的是"多少种"和"最典型的几个"。
+    """
+    if not resolutions:
+        return "（无）"
+    shown = "、".join(f"{w}×{h}({n} 张)" for w, h, n in resolutions[:limit])
+    if len(resolutions) > limit:
+        shown += f"…等 {len(resolutions)} 种"
+    return shown
+
+
 def _resolutions(payload: dict) -> list[tuple[int, int, int]]:
     out = []
     for item in payload.get("resolutions") or []:
@@ -206,7 +220,7 @@ def evaluate_probe(
     # ---- 分辨率：严重程度取决于 preprocess_on ----
     resolutions = _resolutions(payload)
     if len(resolutions) > 1:
-        described = "、".join(f"{w}×{h}({n} 张)" for w, h, n in resolutions)
+        described = _describe_resolutions(resolutions)
         if preprocess_on:
             findings.append(Finding(
                 LEVEL_WARN, "CALIB_RESOLUTION_MIXED",
@@ -229,7 +243,7 @@ def evaluate_probe(
         want_h, want_w = expected_hw
         wrong = [(w, h, n) for w, h, n in resolutions if (w, h) != (want_w, want_h)]
         if wrong:
-            described = "、".join(f"{w}×{h}({n} 张)" for w, h, n in wrong)
+            described = _describe_resolutions(wrong)
             message = (f"有图片的尺寸不是模型输入的 {want_w}×{want_h}：{described}")
             problems.append(message)
             findings.append(Finding(

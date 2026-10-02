@@ -566,10 +566,13 @@ def cmd_calib_scan(argv):
     # ---- 分辨率 ----
     real_resolutions = [r for r in payload["resolutions"] if r[0] and r[1]]
     if len(real_resolutions) > 1:
+        # **只列前几个**。实测过一个数据集有 1474 种分辨率，全列出来这条消息上万字符，
+        # 会把结论表撑爆。用户需要的是"种类数"和"最典型的几个"，不是完整清单。
+        shown = "、".join(
+            "%dx%d×%d" % (w, h, c) for w, h, c in real_resolutions[:5])
+        more = "，等 %d 种" % len(real_resolutions) if len(real_resolutions) > 5 else ""
         payload["warnings"].append(
-            "存在 %d 种分辨率：%s" % (
-                len(real_resolutions),
-                "、".join("%dx%d×%d" % (w, h, c) for w, h, c in real_resolutions)))
+            "存在 %d 种分辨率：%s%s" % (len(real_resolutions), shown, more))
 
     if duplicates:
         payload["warnings"].append("检测到 %d 组内容重复的图片" % len(duplicates))
@@ -608,9 +611,15 @@ def _parse_scan_opts(argv):
 
 
 def _parse_shape(text):
-    """'1x3x640x640' 或 '640x640' → 元组。取最后两维作为 W/H 由调用方决定。"""
+    """'1x3x640x640' 或 '640x640' → 元组。取最后两维作为 W/H 由调用方决定。
+
+    **全角乘号 `×` 也要认**：界面上显示形状用的是 `×`（更好看），用户也可能自己敲。
+    只认 ASCII 的话会静默返回 None —— 实测踩过：`--shape 1×3×640×640` 变成 None，
+    字节数校验被悄悄跳过。
+    """
     parts = []
-    for chunk in str(text).lower().replace(",", "x").split("x"):
+    normalized = str(text).lower().replace("×", "x").replace("*", "x")
+    for chunk in normalized.replace(",", "x").split("x"):
         chunk = chunk.strip()
         if not chunk:
             continue

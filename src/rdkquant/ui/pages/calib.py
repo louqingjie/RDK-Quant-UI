@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -47,6 +48,13 @@ CALIBRATION_TYPES = [
 ]
 CAL_DATA_TYPES = [("float32", "float32"), ("uint8", "uint8")]
 THUMB_SUBDIR = ".rdkquant/thumbs"
+
+#: 认得的图片后缀。容器里的探针有一份同样的清单；这里这份是**宿主侧**用的
+#: （决定把哪些文件收进工作区），不依赖容器就能跑。
+IMAGE_SUFFIXES = (
+    ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp",
+    ".ppm", ".pgm", ".pbm", ".gif",
+)
 
 
 class CalibPage(StagePage):
@@ -194,24 +202,73 @@ class CalibPage(StagePage):
         self.envChanged.emit()
 
     # ------------------------------------------------------------------
+    def _stage(self, source: Path, emit_line, emit_progress, cancel) -> Path | None:
+        """把校准图片收进工作区，返回容器能看到的那条路径。
+
+        **为什么必须收进来**：容器只挂载工作区（`/workspace`）。工作区**之外**的目录
+        容器根本看不到 —— 之前直接把 `C:\\Users\\...` 传给探针，容器里报的是
+        "目录不存在"（实测）。这和 S1 把模型复制进 `model/` 是同一个道理。
+
+        已经在工作区里的就不用动。
+        """
+        source = Path(source)
+        if not source.is_dir():
+            emit_line(f"[校准] 目录不存在：{source}")
+            return None
+        try:
+            source.resolve().relative_to(self.workspace.resolve())
+            return source                      # 已经在工作区里
+        except ValueError:
+            pass
+
+        target = self.workspace / "cal_images"
+        target.mkdir(parents=True, exist_ok=True)
+        pending = [
+            p for p in sorted(source.iterdir())
+            if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+        ]
+        if not pending:
+            emit_line(f"[校准] {source} 里没有可识别的图片")
+            return None
+
+        emit_line(f"[校准] 正在把 {len(pending)} 张图片收进工作区（cal_images/）…")
+        copied = 0
+        for index, path in enumerate(pending, start=1):
+            if cancel.is_set():
+                emit_line("[校准] 已取消")
+                return None
+            dest = target / path.name
+            # 同名同大小就跳过，重复扫描不会反复复制
+            if not (dest.exists() and dest.stat().st_size == path.stat().st_size):
+                shutil.copy2(path, dest)
+            copied += 1
+            emit_progress(int(index * 100 / len(pending)), f"复制 {index}/{len(pending)}")
+        emit_line(f"[校准] 已收进工作区：{copied} 张 → cal_images/")
+        return target
+
     def _on_scan(self) -> None:
         backend = self.backend()
         if backend is None:
             self.log.append_line("[提示] " + self.environment_hint())
             return
-        directory = self.directory
+        source = Path(self.directory)
         shape = self._suggested("input_shape")
+        dtype = self.dtype_box.currentData()
 
-        def job(emit_line, _emit_progress, cancel):
+        def job(emit_line, emit_progress, cancel):
+            staged = self._stage(source, emit_line, emit_progress, cancel)
+            if staged is None:
+                return {"ok": False, "error": f"目录不可用：{source}"}
             payload = backend.scan_calib(
-                directory, shape=shape, dtype=self.dtype_box.currentData(),
+                staged, shape=shape, dtype=dtype,
                 on_line=emit_line, cancel=cancel,
             )
             thumbs = self.workspace / THUMB_SUBDIR
             try:
-                backend.thumbnails(directory, thumbs, on_line=emit_line, cancel=cancel)
+                backend.thumbnails(staged, thumbs, on_line=emit_line, cancel=cancel)
             except Exception as exc:      # 缩略图失败不该毁掉整次扫描
                 emit_line(f"[校准] 缩略图生成失败：{exc}")
+            payload["_staged"] = str(staged)
             return payload
 
         self.start(job, self._on_scanned, label="校准")

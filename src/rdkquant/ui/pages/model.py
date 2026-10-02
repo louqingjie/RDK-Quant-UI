@@ -208,7 +208,10 @@ class ModelPage(StagePage):
     def _apply_suggestions(self, inputs: list[dict]) -> None:
         names = [i.get("name", "") for i in inputs]
         shape = (inputs[0].get("shape") if inputs else None) or []
-        shape_text = "×".join(str(d) for d in shape) if shape else ""
+        # **用 ASCII 的 x，不是显示用的全角 ×。** 这个值要进 config.yaml（官方格式是
+        # `1x3x640x640`），而且会被传给探针做字节数校验 —— 全角乘号会让解析静默失败
+        # （实测踩过）。界面上要好看可以在渲染时再换。
+        shape_text = "x".join(str(d) for d in shape) if shape else ""
         # 形态启发式：末维是 1/3/4 且第二维不是，更像 NHWC；否则按 NCHW。**只是建议。**
         layout = "NCHW"
         if shape and len(shape) == 4 and shape[-1] in (1, 3, 4) \

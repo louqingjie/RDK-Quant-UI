@@ -244,6 +244,33 @@ def test_f32_suffix_is_mentioned_but_not_relied_on():
 # --------------------------------------------------------------------------
 # 生成参数
 # --------------------------------------------------------------------------
+def test_resolution_description_is_truncated():
+    """分辨率多的时候不能把整张清单塞进结论里。
+
+    实测：用户的数据集有 **1474 种分辨率**，全列出来那条消息上万字符，会把结论表撑爆，
+    而且对用户毫无帮助——他要的是"多少种"和"最典型的几个"。
+    """
+    from rdkquant.core.calib import _describe_resolutions
+
+    many = [(100 + i, 200 + i, i + 1) for i in range(1474)]
+    text = _describe_resolutions(many)
+    assert len(text) < 200, f"描述太长了（{len(text)} 字符）：{text[:80]}…"
+    assert "1474" in text, "种类数必须保留"
+    assert "100×200(1 张)" in text, "最典型的几个要列出来"
+    assert _describe_resolutions([]) == "（无）"
+    assert _describe_resolutions([(640, 640, 48)]) == "640×640(48 张)"
+
+
+def test_many_resolutions_still_blocks_without_preprocess():
+    """1474 种分辨率 + preprocess_on=False 必须是硬错误，而且消息要短。"""
+    many = [[100 + i, 200 + i, 1] for i in range(1474)]
+    verdict = evaluate_probe(payload(resolutions=many), preprocess_on=False)
+    assert verdict.blocked
+    mismatch = next(f for f in verdict.findings if f.code == "CALIB_RESOLUTION_MISMATCH")
+    assert len(mismatch.message) < 300, f"消息太长：{len(mismatch.message)}"
+    assert "1474" in mismatch.message
+
+
 def test_build_spec_output_dir_uses_official_suffix():
     """目录名带官方后缀，让工具的启发式与我们的显式设置一致，不产生告警。"""
     assert CalibBuildSpec(shape="1x3x640x640", dtype="float32").output_dir_name == \
