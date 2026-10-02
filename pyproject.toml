@@ -32,7 +32,9 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-rdkquant = ["data/*.json"]
+# data/ 下有两类东西：镜像清单（数据）和容器侧探针（**不是被导入的模块**，
+# 它有独立的 Python 3.8 兼容约束，运行时被写进工作区再送进容器执行）。
+rdkquant = ["data/*.json", "data/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
