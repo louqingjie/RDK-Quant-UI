@@ -214,16 +214,17 @@ class DockerBackend:
             self.runner, self.workspace,
             self.workspace.rel(src), self.workspace.rel(out),
             shape=spec.shape, layout=spec.layout, color=spec.color, dtype=spec.dtype,
+            count=spec.count,
             mean=spec.mean, scale=spec.scale,
             on_line=on_line, on_progress=on_progress, cancel=cancel,
         )
 
-    def thumbnails(self, src: Path, out: Path, *, size: int = 96,
+    def thumbnails(self, src: Path, out: Path, *, size: int = 96, count: int = 0,
                    on_line: LineCallback, cancel=None) -> dict:
         return containerops.probe_thumbs(
             self.runner, self.workspace,
             self.workspace.rel(src), self.workspace.rel(out),
-            size=size, on_line=on_line, cancel=cancel,
+            size=size, count=count, on_line=on_line, cancel=cancel,
         )
 
 
@@ -455,7 +456,7 @@ class MockBackend:
         self.workspace.ensure()
         on_line(f"$ (mock) probe.py calib-build {src.name} {out.name}")
         out.mkdir(parents=True, exist_ok=True)
-        count = MOCK_SCAN["count"]
+        count = spec.count or MOCK_SCAN["count"]
         per_sample = MOCK_BUILD["bytes_per_sample"]
         written = 0
         for index in range(count):
@@ -479,7 +480,7 @@ class MockBackend:
         on_line(f"[mock] 已写出 {written} 个校准样本到 {out.name}/")
         return payload
 
-    def thumbnails(self, src: Path, out: Path, *, size: int = 96,
+    def thumbnails(self, src: Path, out: Path, *, size: int = 96, count: int = 0,
                    on_line: LineCallback, cancel=None) -> dict:
         out.mkdir(parents=True, exist_ok=True)
         on_line(f"$ (mock) probe.py thumbs {src.name} {out.name}")

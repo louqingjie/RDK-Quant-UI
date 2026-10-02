@@ -641,9 +641,46 @@ def _expected_bytes(shape, dtype):
     return count * itemsize
 
 
+def sample_evenly(files, count):
+    """从有序列表里**均匀**取 `count` 个。
+
+    为什么用间隔取样而不是随机：
+      * 确定 —— 同样的输入永远得到同样的子集，用户能看到、也能复现
+      * 数据集通常是按时间/场景排好序的，间隔取样天然覆盖各个片段，
+        而随机取样可能全挤在某一段
+
+    实测场景：一个 3504 张、1474 种分辨率的装甲板数据集，均匀取 50 张即可代表全局。
+    """
+    count = int(count or 0)
+    if count <= 0 or count >= len(files):
+        return list(files)
+    step = len(files) / float(count)
+    picked = []
+    seen = set()
+    for i in range(count):
+        index = int(i * step)
+        if index not in seen:              # 极短列表下可能重复，去一下
+            seen.add(index)
+            picked.append(files[index])
+    return picked
+
+
+def _image_files(directory):
+    """目录下的图片文件名，排序后返回（只取本层，不递归）。"""
+    return sorted(
+        name for name in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, name))
+        and name.lower().endswith(IMAGE_EXTS)
+    )
+
+
 def cmd_calib_build(argv):
     """用法: calib-build <src> <out> --shape WxH --layout NHWC|NCHW
-             --color rgb|bgr|gray --dtype uint8|float32 [--mean ..] [--scale ..]
+             --color rgb|bgr|gray --dtype uint8|float32
+             [--count N] [--mean ..] [--scale ..]
+
+    `--count N` 会先从源目录里**均匀采样** N 张再转换。任何尺寸的图都会被缩放到
+    `--shape` 指定的目标尺寸，所以源目录分辨率参差不齐也没关系。
 
     ⚠️ 产物是**无文件头的裸字节**，长度必须恰好 W*H*C*itemsize。
     实测（见 tests/fixtures/CONTAINER_FINDINGS.md）：`cal_data_dir` 不走 np.load，
@@ -653,7 +690,7 @@ def cmd_calib_build(argv):
     """
     if len(argv) < 2:
         return fail("用法: probe.py calib-build <源目录> <输出目录> --shape WxH "
-                    "--layout NHWC --color bgr --dtype float32")
+                    "--layout NHWC --color bgr --dtype float32 [--count N]")
     src, out = argv[0], argv[1]
     opts = _parse_build_opts(argv[2:])
 
@@ -672,12 +709,12 @@ def cmd_calib_build(argv):
     layout = opts["layout"]
     dtype = opts["dtype"]
 
-    files = sorted(
-        name for name in os.listdir(src)
-        if os.path.isfile(os.path.join(src, name)) and name.lower().endswith(IMAGE_EXTS)
-    )
+    files = _image_files(src)
     if not files:
         return fail("源目录里没有可识别的图片")
+
+    available = len(files)
+    files = sample_evenly(files, opts["count"])
 
     if not os.path.isdir(out):
         os.makedirs(out)
@@ -731,6 +768,9 @@ def cmd_calib_build(argv):
         "color": opts["color"],
         "dtype": dtype,
         "normalized": bool(opts["mean"] or opts["scale"]),
+        # 采样信息：让界面能说清"从 3504 张里取了 50 张"
+        "available": available,
+        "sampled": len(files),
     }
     if mismatched:
         payload["ok"] = False
@@ -744,7 +784,7 @@ def cmd_calib_build(argv):
 def _parse_build_opts(argv):
     opts = {
         "shape": None, "layout": "NHWC", "color": "bgr",
-        "dtype": "float32", "mean": None, "scale": None,
+        "dtype": "float32", "mean": None, "scale": None, "count": 0,
     }
     i = 0
     while i < len(argv):
@@ -752,6 +792,12 @@ def _parse_build_opts(argv):
         value = argv[i + 1] if i + 1 < len(argv) else None
         if key == "--shape":
             opts["shape"] = _parse_shape(value)
+            i += 2
+        elif key == "--count":
+            try:
+                opts["count"] = int(value)
+            except (TypeError, ValueError):
+                opts["count"] = 0
             i += 2
         elif key == "--layout":
             opts["layout"] = (value or "NHWC").upper()
@@ -786,18 +832,28 @@ def _parse_floats(text):
 
 
 def cmd_thumbs(argv):
-    """用法: probe.py thumbs <源目录> <输出目录> [--size 96]"""
+    """用法: probe.py thumbs <源目录> <输出目录> [--size 96] [--count N]
+
+    `--count N` 与 `calib-build` 用**同一套均匀采样**，所以看到的缩略图就是
+    实际会用来生成校准数据的那几张。
+    """
     if len(argv) < 2:
-        return fail("用法: probe.py thumbs <源目录> <输出目录> [--size 96]")
+        return fail("用法: probe.py thumbs <源目录> <输出目录> [--size 96] [--count N]")
     src, out = argv[0], argv[1]
     size = 96
-    if "--size" in argv:
-        idx = argv.index("--size")
-        if idx + 1 < len(argv):
-            try:
-                size = int(argv[idx + 1])
-            except ValueError:
-                pass
+    count = 0
+    for flag, cast in (("--size", int), ("--count", int)):
+        if flag in argv:
+            idx = argv.index(flag)
+            if idx + 1 < len(argv):
+                try:
+                    value = cast(argv[idx + 1])
+                except (TypeError, ValueError):
+                    continue
+                if flag == "--size":
+                    size = value
+                else:
+                    count = value
 
     backend = detect_imaging()
     if backend is None:
@@ -808,12 +864,14 @@ def cmd_thumbs(argv):
 
     made = []
     failures = []
+    # 和 calib-build 同一套采样 —— 看到的缩略图就是实际会用的那几张
+    names = sample_evenly(_image_files(src), count)
     if backend == "PIL":
         from PIL import Image
 
-        for name in sorted(os.listdir(src)):
+        for name in names:
             full = os.path.join(src, name)
-            if not os.path.isfile(full) or not name.lower().endswith(IMAGE_EXTS):
+            if not os.path.isfile(full):
                 continue
             try:
                 with Image.open(full) as im:
@@ -838,9 +896,9 @@ def cmd_thumbs(argv):
         except Exception:
             skimage = None
 
-        for name in sorted(os.listdir(src)):
+        for name in names:
             full = os.path.join(src, name)
-            if not os.path.isfile(full) or not name.lower().endswith(IMAGE_EXTS):
+            if not os.path.isfile(full):
                 continue
             try:
                 target = os.path.join(out, os.path.splitext(name)[0] + ".png")

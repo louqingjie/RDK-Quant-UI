@@ -41,6 +41,9 @@ class CalibBuildSpec:
     dtype: str = "float32"
     mean: tuple[float, ...] | None = None
     scale: tuple[float, ...] | None = None
+    #: 从源目录里**均匀采样**多少张；0 表示全部用上。
+    #: 官方建议校准集 20~100 张，而实际数据集动辄几千张，采样是必须的。
+    count: int = 0
 
     @property
     def output_dir_name(self) -> str:

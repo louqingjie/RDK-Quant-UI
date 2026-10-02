@@ -182,6 +182,7 @@ def probe_calib_scan(
 def probe_calib_build(
     runner, workspace, src: str, out: str, *,
     shape: str, layout: str, color: str, dtype: str,
+    count: int = 0,
     mean: Sequence[float] | None = None,
     scale: Sequence[float] | None = None,
     **kw
@@ -190,6 +191,8 @@ def probe_calib_build(
         "calib-build", src, out,
         "--shape", shape, "--layout", layout, "--color", color, "--dtype", dtype,
     ]
+    if count:
+        argv += ["--count", str(int(count))]
     if mean:
         argv += ["--mean", " ".join(str(v) for v in mean)]
     if scale:
@@ -197,8 +200,13 @@ def probe_calib_build(
     return run_probe(runner, workspace, argv, **kw)
 
 
-def probe_thumbs(runner, workspace, src: str, out: str, *, size: int = 96, **kw) -> dict:
-    return run_probe(runner, workspace, ["thumbs", src, out, "--size", str(size)], **kw)
+def probe_thumbs(runner, workspace, src: str, out: str, *, size: int = 96,
+                 count: int = 0, **kw) -> dict:
+    argv = ["thumbs", src, out, "--size", str(size)]
+    if count:
+        # 和 calib-build 同一套采样 —— 看到的就是会用到的那几张
+        argv += ["--count", str(int(count))]
+    return run_probe(runner, workspace, argv, **kw)
 
 
 def probe_result_ok(payload: dict) -> tuple[bool, str]:

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -124,6 +125,21 @@ class CalibPage(StagePage):
             self.dtype_box.addItem(label, value)
         self.dtype_box.currentIndexChanged.connect(self._on_param_changed)
         params.add(self._labelled("数据类型 cal_data_type", self.dtype_box))
+
+        # 采样张数：官方建议 20~100 张，而真实数据集动辄几千张（实测一个装甲板数据集
+        # 有 3504 张、1474 种分辨率），必须能挑出有代表性的子集。
+        self.count_box = QSpinBox()
+        self.count_box.setRange(0, 1000)
+        self.count_box.setValue(50)
+        self.count_box.setSpecialValueText("全部")
+        self.count_box.setSuffix(" 张")
+        self.count_box.setToolTip(
+            "从源目录里**均匀**取样多少张（0 = 全部用上）。\n"
+            "均匀取样而不是随机：结果可复现，而且数据集通常按时间/场景排序，\n"
+            "间隔取样天然覆盖各个片段。"
+        )
+        self.count_box.valueChanged.connect(self._on_param_changed)
+        params.add(self._labelled("采样张数", self.count_box))
 
         self.preprocess_box = QCheckBox(
             "preprocess_on —— 让工具自己 resize（官方建议保持关闭）"
@@ -265,7 +281,10 @@ class CalibPage(StagePage):
             )
             thumbs = self.workspace / THUMB_SUBDIR
             try:
-                backend.thumbnails(staged, thumbs, on_line=emit_line, cancel=cancel)
+                backend.thumbnails(
+                    staged, thumbs, count=self.count_box.value(),
+                    on_line=emit_line, cancel=cancel,
+                )
             except Exception as exc:      # 缩略图失败不该毁掉整次扫描
                 emit_line(f"[校准] 缩略图生成失败：{exc}")
             payload["_staged"] = str(staged)
@@ -372,6 +391,7 @@ class CalibPage(StagePage):
             layout="NCHW",
             color="bgr",
             dtype=self.dtype_box.currentData(),
+            count=self.count_box.value(),
         )
         out = self.workspace / spec.output_dir_name
         source = self.directory
