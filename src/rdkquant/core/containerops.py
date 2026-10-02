@@ -189,9 +189,17 @@ def write_selection(workspace: Any, names: Sequence[str]) -> Path:
     return target
 
 
-def stats_path(workspace: Any) -> Path:
-    """逐张统计文件的**宿主侧**路径。"""
-    return workspace.root / PROBE_DIR_NAME / STATS_FILE_NAME
+def stats_path(workspace_root: Path | str) -> Path:
+    """逐张统计文件的**宿主侧**路径。传入工作区**根目录**。
+
+    ⚠️ 参数是目录，不是 `Workspace` 对象。这里踩过一个很阴的坑：原来写的是
+    `workspace.root`，而页面传进来的是 `Path` —— **`Path` 恰好也有 `.root`
+    属性**，它是字符串（盘符或 `/`），于是 `str / str` 抛
+    `TypeError: unsupported operand type(s) for /: 'str' and 'str'`。
+    报错信息和真实原因（传错了类型）看起来毫不相干，排查成本很高。
+    现在显式 `Path()` 一层，传 Path 或 Workspace.root 都对。
+    """
+    return Path(workspace_root) / PROBE_DIR_NAME / STATS_FILE_NAME
 
 
 def probe_calib_scan(
@@ -206,7 +214,7 @@ def probe_calib_scan(
     if want_stats:
         # 让探针把逐张统计写到工作区里。走文件而不是回包：3504 条约 150 KB，
         # 作为"最后一行 JSON"会变成一条 150 KB 的日志行，文本框渲染不动。
-        argv += ["--stats-file", workspace.rel(stats_path(workspace))]
+        argv += ["--stats-file", workspace.rel(stats_path(workspace.root))]
     return run_probe(runner, workspace, argv, **kw)
 
 

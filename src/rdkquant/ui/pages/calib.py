@@ -616,6 +616,9 @@ class CalibPage(StagePage):
         self._stats = []
         try:
             self._stats = load_stats(containerops.stats_path(self.workspace))
+            # 上一次失败可能把筛选区禁用了，成功时要恢复 —— 否则修好之后
+            # 界面还是灰的，用户会以为功能坏了（踩过）
+            self.filter_section.setEnabled(True)
         except Exception as exc:
             # 读不出来时筛选不可用，但聚合结果仍然有效，不该整页报废
             self.log.append_line(f"[筛选] 逐张统计不可用（{exc}），筛选已禁用")

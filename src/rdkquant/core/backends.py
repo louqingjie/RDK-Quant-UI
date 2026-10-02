@@ -507,7 +507,7 @@ def _write_mock_stats(workspace: Workspace) -> Path:
     """
     import json
 
-    target = containerops.stats_path(workspace)
+    target = containerops.stats_path(workspace.root)
     target.parent.mkdir(parents=True, exist_ok=True)
     shapes = ((640, 640), (1920, 1080), (1280, 720), (320, 240))
     files = []

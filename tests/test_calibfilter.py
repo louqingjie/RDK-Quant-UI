@@ -291,3 +291,34 @@ def test_load_stats_skips_entries_without_a_name(tmp_path: Path):
     path.write_text(json.dumps({"files": [{"w": 1, "h": 1}, {"n": "ok.jpg"}]}),
                     encoding="utf-8")
     assert [s.name for s in load_stats(path)] == ["ok.jpg"]
+
+
+# --------------------------------------------------------------------------
+# 统计文件的路径
+# --------------------------------------------------------------------------
+def test_stats_path_accepts_a_plain_path():
+    """`stats_path` 收的是**目录**，页面传进来的也是 `Path`。
+
+    这里踩过一个很阴的坑：实现里写的是 `workspace.root`，而页面传的是 `Path` ——
+    **`Path` 恰好也有 `.root` 属性**，它是字符串（盘符或 `/`），于是 `str / str` 抛
+    `TypeError: unsupported operand type(s) for /: 'str' and 'str'`。
+    报错信息和真实原因（传错了类型）看起来毫不相干。
+
+    这条测试如果用 `Path('/tmp/ws')` 会**假通过** —— 因为 `Path('/tmp/ws').root`
+    是 `'/'`，`'/' / 'x'` 恰好还是能拼出个奇怪的路径而不是报错。所以必须用一个
+    相对路径来压出真正的失败模式。
+    """
+    from rdkquant.core import containerops
+
+    # 相对路径：Path.root 是空字符串，`'' / 'x'` 必然 TypeError
+    result = containerops.stats_path(Path("runs/current"))
+    assert result.name == "calib-stats.json"
+    assert result.parent.name == ".rdkquant"
+
+
+def test_stats_path_accepts_a_workspace_root(tmp_path: Path):
+    """也要能吃 `Workspace.root` —— 真实后端就是这么调的。"""
+    from rdkquant.core import containerops
+
+    result = containerops.stats_path(tmp_path)
+    assert result == tmp_path / ".rdkquant" / "calib-stats.json"
