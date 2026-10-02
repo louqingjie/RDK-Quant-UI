@@ -629,6 +629,12 @@ def _expected_bytes(shape, dtype):
 def cmd_calib_build(argv):
     """用法: calib-build <src> <out> --shape WxH --layout NHWC|NCHW
              --color rgb|bgr|gray --dtype uint8|float32 [--mean ..] [--scale ..]
+
+    ⚠️ 产物是**无文件头的裸字节**，长度必须恰好 W*H*C*itemsize。
+    实测（见 tests/fixtures/CONTAINER_FINDINGS.md）：`cal_data_dir` 不走 np.load，
+    而是把文件当裸字节读、按 cal_data_type 重新解释。放 `.npy` 会失败，报
+    "cannot reshape array of size N into shape ..."，N 里多出来的正是 128 字节文件头。
+    **不要"优化"成 .npy。**
     """
     if len(argv) < 2:
         return fail("用法: probe.py calib-build <源目录> <输出目录> --shape WxH "
@@ -665,6 +671,10 @@ def cmd_calib_build(argv):
     total_bytes = 0
     failures = []
     total = len(files)
+    # 每个样本应有的字节数：裸字节，没有文件头。生成完逐个自检，
+    # 因为字节数不对时工具只会报一句难懂的 reshape 错误。
+    per_sample = _expected_bytes((1, channels, height, width), dtype)
+    mismatched = []
     progress(0, total)
 
     for index, name in enumerate(files, start=1):
@@ -686,6 +696,8 @@ def cmd_calib_build(argv):
                 handle.write(data)
             written += 1
             total_bytes += len(data)
+            if per_sample is not None and len(data) != per_sample:
+                mismatched.append("%s(%d≠%d)" % (name, len(data), per_sample))
         except Exception as exc:
             failures.append("%s: %s" % (name, exc))
         progress(index, total)
@@ -697,6 +709,7 @@ def cmd_calib_build(argv):
         "failed": len(failures),
         "failures": failures[:10],
         "bytes": total_bytes,
+        "bytes_per_sample": per_sample,
         "out_dir": os.path.basename(os.path.normpath(out)),
         "shape": list(shape),
         "layout": layout,
@@ -704,7 +717,11 @@ def cmd_calib_build(argv):
         "dtype": dtype,
         "normalized": bool(opts["mean"] or opts["scale"]),
     }
-    if written == 0:
+    if mismatched:
+        payload["ok"] = False
+        payload["error"] = ("产出的字节数不符合预期（工具只接受无文件头的裸字节，"
+                            "长度必须恰好等于 形状×类型大小）：" + "、".join(mismatched[:5]))
+    elif written == 0:
         payload["error"] = "没有一张图转换成功"
     return finish(payload)
 
