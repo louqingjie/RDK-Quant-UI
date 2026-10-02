@@ -576,3 +576,52 @@ def test_interrupt_handler_installs_a_heartbeat_timer(qapp, monkeypatch):
         timer.stop()
     finally:
         signal.signal(signal.SIGINT, original)
+
+
+# --------------------------------------------------------------------------
+# 检查页必须检查「S1 选的那一个」模型
+# --------------------------------------------------------------------------
+def test_check_page_has_no_model_before_s1_picks_one(shell):
+    assert shell.stage_pages[1].model_path() is None
+
+
+def test_check_page_uses_the_model_s1_picked(shell, tmp_path: Path):
+    """回归测试：检查页曾经按名字取 model/ 里第一个文件。
+
+    model/ 会累积历次导入，于是 `sorted(...)[0]` 永远返回最旧的那个——
+    用户重新导出了 float32 的模型，检查页却还在跑旧的 float16 文件，
+    报的还是旧模型的错。极具误导性，实测发生过。
+    """
+    model_dir = tmp_path / "run" / "model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "0526.onnx").write_bytes(b"old")
+    (model_dir / "0708.onnx").write_bytes(b"new")
+
+    model, check, _calib = shell.stage_pages
+    model.model_path = model_dir / "0708.onnx"
+    shell.refresh_workflow()
+
+    picked = check.model_path()
+    assert picked is not None
+    assert picked.name == "0708.onnx", (
+        f"应当检查 S1 选的那份，实际拿到 {picked.name} —— "
+        "按名字排序会永远取到最旧的模型"
+    )
+
+
+def test_check_failure_is_not_reported_as_a_format_problem(shell, tmp_path: Path, monkeypatch):
+    """工具自己失败（rc≠0）时，不能说成"输出格式变了"——那会把用户引错方向。"""
+    model_dir = tmp_path / "run" / "model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model = model_dir / "m.onnx"
+    model.write_bytes(b"x")
+
+    _model_page, check, _calib = shell.stage_pages
+    check.checked_model = model
+    check.log_path = None
+    check._on_checked((255, ["2026-01-01 00:00:00,000 ERROR something broke"]))
+
+    text = check.raw_label.text()
+    assert "255" in text
+    assert "格式" not in text, "rc≠0 不是格式问题，别把用户引向解析器"
+    assert "ERROR" in text

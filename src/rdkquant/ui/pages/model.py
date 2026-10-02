@@ -129,6 +129,16 @@ class ModelPage(StagePage):
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         self.log.append_line(f"[模型] 已导入 {source.name} → model/{target.name}")
+
+        # model/ 会累积历次导入的文件，而后续步骤只认当前这一份。既然含糊过
+        # （检查页曾经按名字取第一个，于是永远在跑最旧的模型），就把话说清楚。
+        others = sorted(p.name for p in target.parent.glob("*.onnx") if p.name != target.name)
+        if others:
+            shown = "、".join(others[:3]) + ("…" if len(others) > 3 else "")
+            self.log.append_line(
+                f"[模型] model/ 里还有 {len(others)} 个旧模型（{shown}），"
+                "后续步骤只认当前这份。"
+            )
         self.model_path = target
         self._inspect()
 

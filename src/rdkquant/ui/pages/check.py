@@ -130,6 +130,9 @@ class CheckPage(StagePage):
         self.checked_model = model
         self.passed = False
         self.report = None
+        # 明确说是对**哪个**模型在检查。model/ 里可能有好几个文件，
+        # 不写清楚的话"检查通过"到底针对哪份就是含糊的。
+        self.log.append_line(f"[检查] 模型：model/{model.name}，架构：{march}")
         self.envChanged.emit()
 
         def job(emit_line, _emit_progress, cancel):
@@ -148,13 +151,21 @@ class CheckPage(StagePage):
         self.start(job, self._on_checked, label="检查")
 
     def model_path(self) -> Path | None:
-        """模型由 S1 决定；从工作区里找那份副本。
+        """要检查的模型 —— **必须问 S1，不能自己猜**。
 
-        不直接问 S1 页面——页面之间不耦合，工作区里的 model/ 才是共同的事实来源。
+        这里曾经是 `sorted(model_dir.glob("*.onnx"))[0]`，也就是按名字取第一个。
+        model/ 会累积历次导入的模型，于是 "0526.onnx" < "0708.onnx" 意味着
+        **永远检查最旧的那个**。用户重新导出了 float32 的模型，检查页却还在跑
+        旧的 float16 文件，报的还是旧模型的错——极具误导性。
+
+        教训：注释里写着"由 S1 决定"但代码里另外猜一个来源，等于没写。
+        S1 已经把它的选择写进 RunContext.suggested_input_parameters / model_path，
+        这里只能读它。
         """
-        model_dir = self.workspace / "model"
-        candidates = sorted(model_dir.glob("*.onnx")) if model_dir.is_dir() else []
-        return candidates[0] if candidates else None
+        ctx = self.context_provider()
+        if ctx is None or ctx.model_path is None:
+            return None
+        return Path(ctx.model_path)
 
     def _on_checked(self, result) -> None:
         code, lines = result
@@ -179,16 +190,28 @@ class CheckPage(StagePage):
             self.tile_verdict.set_value("未通过", tone=Tone.DANGER)
             for tile in (self.tile_nodes, self.tile_subgraph, self.tile_cpu):
                 tile.set_value("—")
-            self.raw_label.setText(
-                f"退出码 {code}。没能从日志里解析出节点表——"
-                "格式可能变了，请看日志面板里的原始输出。"
-            )
-            self.set_findings([Finding(
-                LEVEL_ERROR, "CHECK_UNPARSED",
-                "没能解析出节点表，本次检查判为未通过",
-                "请看日志面板的原始输出；如果工具确实通过了，说明输出格式与"
-                "解析器不一致（解析器可以容忍未知列，但不该完全认不出来）。",
-            )])
+            if code != 0:
+                # 工具自己失败了。别说成"格式变了"——那是两回事，
+                # 会把用户引向错误的方向（去找解析器的问题，而不是修模型）。
+                self.raw_label.setText(
+                    f"hb_mapper checker 失败（退出码 {code}）。"
+                    "日志里的 ERROR 就是原因。"
+                )
+                self.set_findings([Finding(
+                    LEVEL_ERROR, "CHECK_FAILED",
+                    f"模型检查失败（退出码 {code}）",
+                    "看日志面板里最后一条 ERROR——通常是模型本身不满足官方约束。",
+                )])
+            else:
+                self.raw_label.setText(
+                    f"退出码 {code}，但没能从日志里解析出节点表——"
+                    "请把日志面板里的原始输出发出来。"
+                )
+                self.set_findings([Finding(
+                    LEVEL_ERROR, "CHECK_UNPARSED",
+                    "工具执行成功，但没能解析出节点表",
+                    "输出格式可能与解析器不一致，请看日志面板的原始输出。",
+                )])
         else:
             # rc==0 且解析出了节点表才算通过。两个条件缺一不可。
             self.passed = code == 0 and self.report.saw_node_table
