@@ -260,3 +260,79 @@ def test_log_view_survives_theme_change_with_content(qapp, shell):
     qapp.processEvents()
     assert log.text_all() == before
     assert log.blockCount() >= 2
+
+
+# --------------------------------------------------------------------------
+# 启动路径：不带参数应当开界面
+# --------------------------------------------------------------------------
+def test_cli_without_args_launches_ui(monkeypatch):
+    """不带参数就是开图形界面，不该要求用户记住 `ui` 子命令。
+
+    这个行为必须和打包产物一致——它们对使用者而言就是同一个程序。
+    之前 CLI 缺少这个分支，`.venv/bin/rdkquant` 会直接报
+    "the following arguments are required: cmd"，而 README 里写的是直接运行。
+    """
+    from rdkquant import cli
+
+    captured = {}
+
+    def fake_ui(args):
+        captured["workspace"] = args.workspace
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_ui", fake_ui)
+    assert cli.main([]) == 0
+    assert "workspace" in captured
+
+
+def test_cli_ui_subcommand_still_works(monkeypatch):
+    from rdkquant import cli
+
+    captured = {}
+
+    def fake_ui(args):
+        captured["workspace"] = args.workspace
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_ui", fake_ui)
+    assert cli.main(["ui"]) == 0
+    assert captured["workspace"] == cli.DEFAULT_WORKSPACE
+
+
+def test_packaging_entry_routing_matches_cli(monkeypatch):
+    """打包入口和 CLI 对「不带参数」必须给出一致行为。
+
+    这是回归测试：两者的路由逻辑曾经不一致，导致开发时能跑的方式和使用者
+    拿到的方式行为不同。
+    """
+    import importlib.util
+
+    import rdkquant
+
+    root = Path(rdkquant.__file__).resolve().parents[2]
+    entry_path = root / "packaging" / "entry.py"
+    assert entry_path.is_file(), f"找不到打包入口：{entry_path}"
+
+    spec = importlib.util.spec_from_file_location("rdkquant_packaging_entry", entry_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    launched = {}
+
+    def fake_run(**_kwargs):
+        launched["gui"] = True
+        return 0
+
+    monkeypatch.setattr("rdkquant.ui.app.run", fake_run)
+    assert module.main([]) == 0
+    assert launched.get("gui"), "打包产物在不带参数时应当启动图形界面"
+
+
+@pytest.mark.parametrize("argv", [["doctor", "--help"], ["images", "--help"], ["ui", "--help"]])
+def test_cli_subcommands_are_registered(argv):
+    """子命令必须都注册得上——顺手守住 argparse 的结构。"""
+    from rdkquant import cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args(argv)
+    assert excinfo.value.code == 0

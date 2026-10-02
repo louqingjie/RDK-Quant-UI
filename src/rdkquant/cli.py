@@ -21,6 +21,9 @@ from .core.probe import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, GB, probe_host
 
 _ICON = {LEVEL_OK: "[ OK ]", LEVEL_WARN: "[WARN]", LEVEL_ERROR: "[FAIL]"}
 
+#: 不带参数启动时的默认工作区
+DEFAULT_WORKSPACE = "./runs/current"
+
 
 def _force_utf8_stdout() -> None:
     for stream in (sys.stdout, sys.stderr):
@@ -224,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mock.set_defaults(func=_cmd_mock)
 
     p_ui = sub.add_parser("ui", help="启动图形界面")
-    p_ui.add_argument("--workspace", default="./runs/current")
+    p_ui.add_argument("--workspace", default=DEFAULT_WORKSPACE)
     p_ui.set_defaults(func=_cmd_ui)
 
     return parser
@@ -239,11 +242,20 @@ def _cmd_ui(args: argparse.Namespace) -> int:
         return 1
     return run(workspace=Path(args.workspace))
 
-
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
+    args_list = list(sys.argv[1:] if argv is None else argv)
+
+    # 不带参数 = 开图形界面。
+    # 必须和打包产物（packaging/entry.py）行为一致：使用者的心智模型是
+    # "双击/直接运行就是开界面"，不该被要求记住一个 ui 子命令。
+    # 这里刻意用模块级名字调用 _cmd_ui，而不是走 args.func，
+    # 这样它在单测里是可替换的。
+    if not args_list:
+        return _cmd_ui(argparse.Namespace(workspace=DEFAULT_WORKSPACE))
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
     return int(args.func(args) or 0)
 
 
