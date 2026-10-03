@@ -12,7 +12,10 @@ requires-python = ">=3.10,<3.15"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 # 说明：到目前为止 core 是**纯标准库**实现（urllib / subprocess / ctypes），
-# 刻意不引入 requests、psutil。onnx 与 PyYAML 会在配置与模型内省模块落地时加入。
+# 刻意不引入 requests、psutil。这里原先写着「onnx 与 PyYAML 会在配置与模型内省
+# 模块落地时加入」—— **M4 落地时改成了只把 PyYAML 加进 dev**：config.yaml 手写，
+# 运行时依赖保持为空。理由与代价见 docs/adr/0001-手写-config-yaml.md。
+# onnx 至今没加：模型的形状内省走容器侧探针（core/probe.py），宿主侧不需要它。
 dependencies = []
 
 [project.optional-dependencies]
@@ -20,7 +23,10 @@ dependencies = []
 # 刻意保持只有 PySide6 —— 不引入 qfluentwidgets / superqt / BreezeStyleSheets，
 # 观感靠"平台调色板 + 排版纪律"实现，而不是靠皮肤。
 ui = ["PySide6>=6.7"]
-dev = ["pytest>=8.0"]
+# PyYAML **只在测试里用**：解析我们手写出来的 config.yaml，断言结构而不是字符串
+# 相等。见 core/conversion.py 的模块说明与 docs/adr/0001-手写-config-yaml.md。
+# 运行时 `dependencies` 保持为空 —— core 到现在仍然是纯标准库。
+dev = ["pytest>=8.0", "PyYAML>=6.0"]
 
 [project.scripts]
 rdkquant = "rdkquant.cli:main"

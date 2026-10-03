@@ -84,8 +84,36 @@ _COLUMN_ALIASES = {
     "target": "device",
     "cosine": "cosine",
     "similarity": "cosine",
+    # 合并之后（见 `_merge_multiword`）它是**一个** token
+    "cosine similarity": "cosine",
     "threshold": "threshold",
 }
+
+#: 表头里**跨多个词、但只是一列**的名字。按空白切词会把它们切开，
+#: 于是这一列之后的所有列在表头与数据行里**错位一格**。
+#:
+#: 实测踩到：`Cosine Similarity` 被切成两格，导致 `Threshold` 读到了
+#: `DataType` 的值（`1.0` 读成 `int8`）。表是同一张，数据行没被切，
+#: 所以只有"切了的列之后的列"会错 —— 而 `Cosine Similarity` 之前的
+#: 列（`Node` / `ON` / `Subgraph` / `Type`）一直是对的，这个 bug 因此藏了很久。
+_MULTIWORD = (("cosine", "similarity"),)
+
+
+def _merge_multiword(cells: Sequence[str]) -> list[str]:
+    """把跨词列名合成一格，让表头与数据行的列数对齐。"""
+    merged: list[str] = []
+    index = 0
+    while index < len(cells):
+        for parts in _MULTIWORD:
+            span = tuple(cell.lower().strip(":") for cell in cells[index:index + len(parts)])
+            if span == parts:
+                merged.append(" ".join(cells[index:index + len(parts)]))
+                index += len(parts)
+                break
+        else:
+            merged.append(cells[index])
+            index += 1
+    return merged
 
 
 #: 节点名里不该出现中日韩字符——ONNX / hb_mapper 的节点名都是 ASCII 标识符。
@@ -164,6 +192,18 @@ class CheckerNode:
     subgraph: str = ""
     type: str = ""
     device: str = ""
+    #: 余弦相似度列。**`--` 表示没算过**（`calibration_type` 是 load / skip 时如此），
+    #: 不是"相似度为 0"。所以类型是 str 不是 float —— 留 `--` 的原文才好显示。
+    cosine: str = ""
+    threshold: str = ""
+
+    @property
+    def similarity(self) -> float | None:
+        """余弦相似度，**读不出来返回 None**（`--` 就是读不出来）。"""
+        try:
+            return float(self.cosine)
+        except (TypeError, ValueError):
+            return None
 
     @property
     def on_cpu(self) -> bool:
@@ -230,8 +270,11 @@ def parse_checker(lines: Iterable[str]) -> CheckerReport | None:
 
         if header_map is None:
             if _looks_like_header(cells):
-                header_map = _map_header(cells)
-                header_width = len(cells)
+                # 合并跨词列名之后再建索引：不合并的话，跨词那一列**之后**的
+                # 每一列在表头与数据行里都差一格（实测把 Threshold 读成了 DataType）
+                merged = _merge_multiword(cells)
+                header_map = _map_header(merged)
+                header_width = len(merged)
                 lower_bound = min(3, header_width)
                 # 设备列的位置，按可靠性依次回退：
                 #   1) 显式的 Device 列
@@ -285,6 +328,8 @@ def parse_checker(lines: Iterable[str]) -> CheckerReport | None:
             subgraph=cell("subgraph"),
             type=cell("type"),
             device=device,
+            cosine=cell("cosine"),
+            threshold=cell("threshold"),
         )
         if node.name:
             nodes.append(node)

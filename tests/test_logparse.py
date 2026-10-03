@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 RDK Quantization UI contributors
 
-"""`hb_mapper checker` 输出的解析测试。
+"""节点表解析的测试。
 
-⚠️ 这里的样例文本是**构造的**，不是真实输出——计划期间官方文档站点取不到，
-真实格式尚未验证。等导入 OE 镜像后要用真实输出替换（见 M3 计划的风险 1）。
-测试的价值在于锁住"容错语法"的行为：列数不匹配、行尾注释、尾声日志、
+⚠️ 这里的样例文本**大部分是构造的**。真实格式已经从 X5 CPU 容器的实测里拿到，
+见下面 `REAL_MAKERTBIN_TABLE` 与 `test_real_table_column_alignment` ——
+那两条是回归测试，不是容错测试。
+
+其余测试的价值在于锁住"容错语法"的行为：列数不匹配、行尾注释、尾声日志、
 缺列、CRLF 都不能把解析搞崩。
 """
 
@@ -177,6 +179,54 @@ def test_inline_comment_does_not_break_device_column():
     assert softmax.on_cpu and not softmax.on_bpu
 
 
+#: **从真日志里逐字抄下来的**（X5 CPU 容器，`hb_mapper makertbin`，2026-10-03）。
+#: 表头里 `Cosine Similarity` 是**两个词、一列** —— 这是列错位的根源。
+REAL_MAKERTBIN_TABLE = (
+    "Node                                                ON   Subgraph  Type                           Cosine Similarity  Threshold  DataType  \n"
+    "-----------------------------------------------------------------------------------------------------------------------\n"
+    "HZ_PREPROCESS_FOR_images                            BPU  id(0)     HzSQuantizedPreprocess         --                 127.0      int8      \n"
+    "/m/model.0/conv/Conv                                BPU  id(0)     HzSQuantizedConv               --                 1.0        int8      \n"
+    "/m/model.0/act/Mul                                  BPU  id(0)     HzLut                          --                 1.0        int8      \n"
+)
+
+
+def test_real_table_column_alignment():
+    """**回归**：跨词列名会让它**之后**的列在表头与数据行之间错位一格。
+
+    `Cosine Similarity` 按空白切成两个 token，于是表头 8 格、数据行 7 格。
+    `Threshold` 在表头是第 6 格（0 起），而数据行第 6 格是 `int8` ——
+    改之前它读到的是 **DataType 的值**。
+
+    这个 bug 藏得住是因为：表是同一张、数据行不被切，所以只有"跨词列**之后**"
+    的列会错；而 `Node` / `ON` / `Subgraph` / `Type` 一直是对的。
+    上面的 `test_parses_makertbin_style_table_with_real_on_semantics` 恰好
+    从没断言过 `threshold`，于是从旁边走了过去。
+    """
+    report = parse_checker(REAL_MAKERTBIN_TABLE.splitlines())
+    assert report is not None
+    assert len(report.nodes) == 3
+    assert report.nodes[1].cosine == "--"
+    assert report.nodes[1].threshold == "1.0", "错位时这里会是 int8"
+    assert report.nodes[0].threshold == "127.0", "预处理节点的阈值本来就不同"
+
+
+def test_real_table_dash_is_not_a_number():
+    """`--` 是"没算过"，不是"相似度为 0"。skip / load 下整列都是 `--`。"""
+    report = parse_checker(REAL_MAKERTBIN_TABLE.splitlines())
+    assert report.nodes[0].cosine == "--"
+    assert report.nodes[0].similarity is None
+
+
+def test_real_table_numbers_are_read():
+    """有数值时读成 float。"""
+    text = "\n".join([
+        "Node        ON   Subgraph  Type              Cosine Similarity  Threshold  DataType",
+        "Conv_0      BPU  id(0)     HzSQuantizedConv  0.9992             1.0        int8",
+    ])
+    report = parse_checker(text.splitlines())
+    assert report.nodes[0].similarity == pytest.approx(0.9992)
+
+
 def test_parses_makertbin_style_table_with_real_on_semantics():
     """列更多的表（Node/ON/Subgraph/Type/Cosine/Threshold/DataType）。
     实测确认 **ON 列装的就是 BPU/CPU**，不是字面量 "ON"——M4 会复用这个解析器。"""
@@ -192,6 +242,8 @@ def test_parses_makertbin_style_table_with_real_on_semantics():
     assert report.nodes[0].device == "BPU"
     assert report.nodes[0].subgraph == "id(0)"
     assert report.nodes[0].type == "HzSQuantizedConv"
+    assert report.nodes[0].cosine == "0.9999"
+    assert report.nodes[0].threshold == "1.0", "跨词列表头不能让这一列错位"
     assert report.nodes[1].device == "CPU"
     assert report.cpu_nodes == ("Softmax_91",)
     assert report.subgraph_count == 2
