@@ -95,6 +95,8 @@ class EnvPage(QWidget):
         self._selected_id: str | None = None
         #: 查询到的远程体积（覆盖清单里的 size_hint_bytes）。详情行要用它。
         self._remote_sizes: dict[str, int] = {}
+        #: 自动探测每个会话只做一次；手动点「查询远程体积」不受这个限制
+        self._remote_probed = False
         self._updating = False
         self._findings: list = []
 
@@ -123,7 +125,9 @@ class EnvPage(QWidget):
         self.refresh_local()
         self.refresh_report()
         if with_remote:
+            # 截图模式：**同步**探测，这样截出来的图上就是真实体积
             self._probe_remote_sync()
+        # 正常启动时由 refresh_report() 触发**异步**自动探测（见 _auto_probe_remote）
 
     # ------------------------------------------------------------------
     # 日志与进度由外壳的共享面板提供，页面内不再各带一份
@@ -304,6 +308,8 @@ class EnvPage(QWidget):
                 self.log.append_line(f"[体检] {finding.message}")
 
         self.refresh_images()
+        # 环境就绪后自动问一次真实体积（每次会话只做一次，Docker 没起来就跳过）
+        self._auto_probe_remote()
         self.envChanged.emit()
 
     def _apply_findings(self) -> None:
@@ -397,7 +403,14 @@ class EnvPage(QWidget):
         self.image_note.setText(spec.note)
 
     def refresh_images(self, remote_sizes: dict[str, int] | None = None) -> None:
-        self._remote_sizes = dict(remote_sizes or {})
+        # ⚠️ **只增不减**：`_remote_sizes` 是"已经问到的精确体积"的缓存，
+        # 刷新**显示**不该把它丢掉。
+        #
+        # 这里踩过一个 bug：原来是 `self._remote_sizes = dict(remote_sizes or {})`，
+        # 而 `refresh_report()` 每次都无参调用本方法 —— 于是刚探测到的体积，
+        # 会被紧接着的一次报告刷新擦成空。表现是"HEAD 明明成功了，界面还是估算值"。
+        if remote_sizes:
+            self._remote_sizes.update(remote_sizes)
         self._updating = True                 # 重建选项期间不发信号，否则会连环触发体检
         try:
             self.image_box.clear()
@@ -453,14 +466,25 @@ class EnvPage(QWidget):
         self.refresh_images(sizes)
         return sizes
 
-    def _probe_remote_async(self) -> None:
+    def _probe_remote_async(self, *, specs=None, silent: bool = False) -> None:
+        """异步问远程体积。
+
+        `specs` 默认问全部；自动探测只问本机还没有的那几个。
+        `silent` 供自动探测用：不问就不打"正在查询"，失败也只留一行摘要，
+        免得离线启动时刷四条失败日志吓人。
+        """
         if self.tasks.busy:
             return
-        self.log.append_line("[远程] 正在查询各镜像的精确体积（HEAD 请求）…")
+        targets = list(specs if specs is not None else self.specs)
+        if not targets:
+            return
+        if not silent:
+            self.log.append_line("[远程] 正在查询各镜像的精确体积（HEAD 请求）…")
 
         def job(emit_line, _emit_progress, cancel):
             sizes: dict[str, int] = {}
-            for spec in self.specs:
+            failures: list[str] = []
+            for spec in targets:
                 if cancel.is_set():
                     break
                 info = img.probe_remote(spec.url)
@@ -468,12 +492,61 @@ class EnvPage(QWidget):
                     sizes[spec.id] = info.content_length
                     emit_line(f"[远程] {spec.id:<15} {img.human_bytes(info.content_length)}")
                 else:
-                    emit_line(f"[远程] {spec.id:<15} 探测失败：{info.error}")
-            return sizes
+                    failures.append(spec.id)
+                    # 自动探测失败**不逐条刷日志** —— 离线启动会连刷四条，很吓人。
+                    # 汇总留给 done() 说一句。
+                    if not silent:
+                        emit_line(f"[远程] {spec.id:<15} 探测失败：{info.error}")
+            return sizes, failures
+
+        def done(result):
+            sizes, failures = result
+            # refresh_images 是"只增不减"的，直接把新探测到的并进去就行
+            self.refresh_images(sizes)
+            if not silent or not failures:
+                return
+            if not sizes:
+                # 离线启动：说清"不影响用"就够了，不要留四行错误
+                self.log.append_line(
+                    "[远程] 连不上官方服务器，体积用清单里的估算值"
+                    "（不影响离线使用，点「查询远程体积」可重试）"
+                )
+            else:
+                self.log.append_line(
+                    f"[远程] {len(failures)} 个镜像没取到精确体积，那几个用清单估算值"
+                )
 
         task = self.tasks.start(job)
         task.line.connect(self.log.append_line)
-        task.finished.connect(lambda sizes: self.refresh_images(sizes))
+        task.finished.connect(done)
+
+    def _auto_probe_remote(self) -> None:
+        """环境就绪后自动问一次远程体积。
+
+        为什么值得自动做：清单里的 `size_hint_bytes` 是**某个时刻的快照**，
+        实测已经和服务器对不上（见 `tests/fixtures/CONTAINER_FINDINGS.md` 第 9 节），
+        而且 X3 两条原先根本没有体积，磁盘检查跑不起来。
+        HEAD 请求不带 body，很便宜。
+
+        两条守卫：
+
+        * **Docker 没起来就不问**。体积是给"下载前判断磁盘够不够"用的；
+          连镜像都导不进来的时候，这个判断没有意义。等环境就绪后
+          `refresh_report()` 会再调一次，所以晚点开 Docker 也能补上。
+        * **只问本机还没导入的那些**。已经装好的镜像不会再下载，
+          知道精确体积没意义。已经导入 X5 CPU 的机器上这里只发 2~3 个请求。
+        """
+        if self._remote_probed or self.tasks.busy:
+            return
+        if not (self.report and self.report.docker.daemon_ok):
+            return
+        self._remote_probed = True          # 每个会话只自动问一次
+        pending = [
+            spec for spec in self.specs
+            if not img.find_loaded(spec.image_ref_hint, self.local)
+        ]
+        if pending:
+            self._probe_remote_async(specs=pending, silent=True)
 
     # ------------------------------------------------------------------
     # 下载并导入

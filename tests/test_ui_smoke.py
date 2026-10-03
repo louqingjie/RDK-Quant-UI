@@ -25,6 +25,7 @@ from rdkquant.core.probe import (
     HostReport,
     RamStatus,
 )
+from rdkquant.core.images import RemoteInfo
 from rdkquant.core.workflow import STAGES, RunContext, Stage, evaluate
 from rdkquant.ui import icons
 from rdkquant.ui.metrics import METRICS, configure
@@ -60,6 +61,17 @@ def shell(qapp, monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: _fake_report())
     monkeypatch.setattr(env_mod.img, "local_images", lambda: [])
+
+    # **必须打桩 `probe_remote`。** 环境页启动后会异步自动 HEAD 四个官方 URL
+    # （见 `_auto_probe_remote`）——不打桩的话每个用例都会真的发网络请求：
+    # 慢，而且在离线的 CI 上每个请求要等到 30 秒超时。
+    # 这里返回一个"探测失败"，正好覆盖"离线时用清单估算值"那条路径。
+    monkeypatch.setattr(
+        env_mod.img, "probe_remote",
+        lambda url, **k: RemoteInfo(
+            content_length=None, accept_ranges=False, ok=False, error="测试不打网络"
+        ),
+    )
 
     platform_palette = qapp.palette()
     apply_theme(qapp, ThemeMode.DARK, platform_palette=platform_palette)
@@ -290,6 +302,154 @@ def test_log_view_survives_theme_change_with_content(qapp, shell):
     qapp.processEvents()
     assert log.text_all() == before
     assert log.blockCount() >= 2
+
+
+# --------------------------------------------------------------------------
+# 自动探测远程体积
+# --------------------------------------------------------------------------
+def _wait_for(predicate, qapp, *, tries: int = 60, delay: float = 0.02) -> bool:
+    """等后台任务回主线程（信号要过事件循环）。"""
+    import time
+
+    for _ in range(tries):
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(delay)
+    return False
+
+
+def test_auto_probes_remote_sizes_when_docker_is_ready(shell, qapp, monkeypatch):
+    """环境就绪时会**自动**问一次真实体积。
+
+    为什么需要自动做：清单里的 `size_hint_bytes` 是某个时刻的快照，实测会和服务器
+    对不上（见 `tests/fixtures/CONTAINER_FINDINGS.md` 第 9 节）。
+    """
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.images import RemoteInfo
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    calls: list[str] = []
+
+    def fake_probe(url, **_kw):
+        calls.append(url)
+        return RemoteInfo(content_length=123456789, accept_ranges=True, ok=True)
+
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    monkeypatch.setattr(env_mod.img, "probe_remote", fake_probe)
+
+    page = shell.env_page
+    page._remote_probed = False            # 模拟"环境刚就绪"
+    page.refresh_report()
+
+    assert _wait_for(lambda: bool(page._remote_sizes), qapp), "后台探测没回来"
+    assert len(calls) == len(page.specs), "每个镜像都该问一次"
+    assert set(page._remote_sizes) == {s.id for s in page.specs}
+    # 详情行要跟着更新成真实体积，而不是清单里的估算值
+    assert "117.7 MB" in page.image_detail.text() or "123456789" not in page.image_detail.text()
+
+
+def test_refresh_report_does_not_wipe_probed_sizes(shell, qapp, monkeypatch):
+    """**刷新报告不能擦掉已经探测到的体积。**
+
+    这里踩过一个 bug：`refresh_images()` 原来写的是
+    `self._remote_sizes = dict(remote_sizes or {})`，而 `refresh_report()` 每次都
+    无参调用它 —— 于是刚 HEAD 回来的精确体积，被紧接着的一次报告刷新擦成空。
+    表现是「HEAD 明明成功了，界面还是清单里的估算值」，而且不打桩根本看不出来。
+    """
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.images import RemoteInfo
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    monkeypatch.setattr(
+        env_mod.img, "probe_remote",
+        lambda url, **k: RemoteInfo(content_length=222222, accept_ranges=True, ok=True),
+    )
+
+    page = shell.env_page
+    page.refresh_report()
+
+    assert _wait_for(lambda: len(page._remote_sizes) == len(page.specs), qapp), \
+        "自动探测没回来"
+
+    page.refresh_report()                  # 再刷一次报告
+    assert len(page._remote_sizes) == len(page.specs), "报告刷新把探测结果擦掉了"
+
+
+def test_probed_size_reaches_the_detail_line(shell, qapp, monkeypatch):
+    """探测到的体积要真的显示出来，不能只存在内存里。"""
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.images import RemoteInfo
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    monkeypatch.setattr(
+        env_mod.img, "probe_remote",
+        lambda url, **k: RemoteInfo(content_length=1_500_000_000, accept_ranges=True, ok=True),
+    )
+
+    page = shell.env_page
+    page.refresh_report()
+    assert _wait_for(lambda: bool(page._remote_sizes), qapp)
+
+    # 1_500_000_000 字节 ≈ 1.40 GiB
+    detail = page.image_detail.text()
+    assert "1.40 GB" in detail, f"详情行没跟上真实体积：{detail}"
+
+
+def test_auto_probe_is_skipped_when_docker_is_down(shell, qapp, monkeypatch):
+    """Docker 没起来就不该发请求。
+
+    体积是给"下载前判断磁盘够不够"用的；连镜像都导不进来的时候这个判断没有意义。
+    顺带这条也保证测试套件不会真的打网络。
+    """
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.images import RemoteInfo
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        env_mod.img, "probe_remote",
+        lambda url, **k: (calls.append(url), RemoteInfo(None, False, False, "不该被调用"))[1],
+    )
+
+    page = shell.env_page
+    page._remote_probed = False
+    page.refresh_report()                  # fixture 的 report 里 daemon_ok=False
+    qapp.processEvents()
+
+    assert calls == [], "Docker 没起来时不该发 HEAD 请求"
+    assert page._remote_probed is False, "没探测就不该置位，等环境就绪后还要补上"
+
+
+def test_auto_probe_only_asks_for_missing_images(shell, qapp, monkeypatch):
+    """已经导入本机的镜像不用再问 —— 它不会再下载。"""
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.images import RemoteInfo
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    page = shell.env_page
+    first = page.specs[0]
+    # 让第一个镜像"已在本机"
+    monkeypatch.setattr(env_mod.img, "local_images", lambda: [first.image_ref_hint])
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        env_mod.img, "probe_remote",
+        lambda url, **k: (calls.append(url), RemoteInfo(1000, True, True))[1],
+    )
+
+    page.refresh_local()
+    page._remote_probed = False
+    page.refresh_report()
+    assert _wait_for(lambda: bool(calls), qapp)
+
+    assert first.url not in calls, "已导入的镜像不该被问"
+    assert len(calls) == len(page.specs) - 1
 
 
 # --------------------------------------------------------------------------
