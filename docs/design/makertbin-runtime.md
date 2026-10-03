@@ -138,6 +138,31 @@ S4 的错误分类要把这类认出来，而不是把原文甩给用户。
 没有它，S4 的解析路径在 mock 下走的是"日志读不到"那条分支，**等于没测**。
 假日志的节点表也照抄了"跨词表头"的形状，否则列错位那个 bug 在 mock 下复现不出来。
 
+## 端到端实测：走的是界面那条路
+
+M4 做完后用 `core/conversion.py` + `DockerBackend` 真跑了一遍 ——
+**和 `ConvertPage._on_run()` 逐行相同**，只少了 Qt 那一层：
+
+    clear_output(output/) → write_config(config.yaml) → backend.compile()
+      → read_log(hb_mapper_makertbin.log) → parse_makertbin()
+      → discover_artifacts(output/) → evaluate_conversion()
+
+结果（`0708.onnx`，`calibration_type: skip`）：
+
+    onnx_model = ./model/0708.onnx        ← 实测过的相对形式
+    清空 output/：8 个文件
+    compile rc = 0
+    日志文件 352 行
+    saw_success=True  saw_end=True  表=True  节点=196  ERROR 行=0
+    产物 5/5：0708.bin 2113KB / calibrated 9442KB / optimized 9184KB
+              original 5648KB / quantized 2728KB
+    三项校验：{'控制台成功字样': True, '余弦相似度表': True, '5 个产出物': True}
+    ok = True
+
+**`config.yaml` 里的路径用相对形式（`./model/x.onnx`）。**
+`Workspace.rel()` 给的是绝对形式（`/workspace/model/x.onnx`），两种容器里都能用，
+但相对形式才是官方写法、也才是这里验证过的 —— 所以加了 `Workspace.rel_dot()`。
+
 ## 怎么复现这些测量
 
 工作区放一份 `config.yaml`（schema 见 [`config-yaml.md`](config-yaml.md)），然后：
