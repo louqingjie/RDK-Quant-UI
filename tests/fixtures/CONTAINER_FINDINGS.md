@@ -100,10 +100,34 @@ Loaded image: openexplorer/ai_toolchain_ubuntu_20_x5_cpu:v1.2.8-py310
 真实 tag 是 **`v1.2.8-py310`**，清单里原先猜的 `v1.2.8` 是错的。
 "不要硬编码镜像名"这条决定救了我们。
 
-## 7. 容器必须以 `--user` 运行
+## 7. 容器必须以 **root** 运行（不传 `--user`）
 
-不加 `--user` 时容器以 root 跑，`hb_mapper_checker.log` 回来是 **root 所有**，
-给用户留下一堆删不掉的文件。`DockerBackend` 传 `--user uid:gid`（POSIX）。
+⚠️ **这一节曾经写反过。** 原文是「容器必须以 `--user` 运行」，理由是
+不传会留下 root 所有的文件。那个理由本身没错，但被一个更硬的事实推翻了：
+
+```
+ModuleNotFoundError: No module named 'torch'
+```
+
+`hmct/ir/onnx_graph.py:21` **无条件** `import torch`。而 torch 装在
+`/root/.local/lib/python3.10/site-packages/`，`/root` 的权限是 **700**。
+所以下面这些全都救不回来：
+
+| 尝试 | 结果 |
+|---|---|
+| `--user 1000:1000` | 进不去 `/root`，`import torch` 失败 |
+| `-e HOME=/root` | 权限仍是 700，无效 |
+| `-e PYTHONPATH=/root/.local/...` | 目录不可读，无效 |
+
+**结论：必须 root。** 文件属主问题改用**事后按需 chown** 处理
+（`runner.py` 的 `fix_ownership`，只在工作区里发现 root 所有的文件时才动，
+且是 best-effort，不影响退出码）。
+
+代价：偶尔会多一次 chown 的往返；WSL 下如果用户在宿主机没有 sudo，
+chown 可能失败——那种情况只记日志，不阻断。
+
+**教训**：文档写的和代码相反时，先假设**代码是对的**（它经过了实测），
+然后去把文档改对，而不是照着文档去改代码。
 
 ## 8. 容器里有一批可复用的官方工具
 
