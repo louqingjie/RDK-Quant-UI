@@ -58,7 +58,13 @@ info "同步 $SRC  →  $DST"
 # 只同步源码与配置文件。**绝不**同步 .venv / .build / dist：
 # 那些是平台相关的构建产物，Windows 侧的拿到 Linux 上用不了，
 # 而且带着 --delete 同步它们会把好好的 Linux venv 删掉。
-ITEMS=(src tests tools packaging scripts pyproject.toml README.md LICENSE .gitignore)
+#
+# `docs` 和 `AGENTS.md` **必须同步**，否则两个平台跑的不是同一个仓库：
+# `test_repo_hygiene.py` 会遍历全仓库的 Markdown 检查相对链接，而
+# `AGENTS.md` 链着 `docs/pitfalls/qt-traps.md`、`docs/README.md`。
+# 漏同步时链接检查在 Linux 上**空跑还全绿** —— 实测撞过：那边只解析到
+# 1 个链接（`LICENSE`），自检断言直接把它抓了出来。
+ITEMS=(src tests tools packaging scripts docs pyproject.toml README.md AGENTS.md LICENSE .gitignore)
 RSYNC_ARGS=(-a --info=stats2)
 [ "$DELETE" = 1 ] && RSYNC_ARGS+=(--delete)
 

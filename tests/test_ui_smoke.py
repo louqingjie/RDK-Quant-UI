@@ -654,7 +654,7 @@ def test_auto_probes_remote_sizes_when_docker_is_ready(shell, qapp, monkeypatch)
     """环境就绪时会**自动**问一次真实体积。
 
     为什么需要自动做：清单里的 `size_hint_bytes` 是某个时刻的快照，实测会和服务器
-    对不上（见 `tests/fixtures/CONTAINER_FINDINGS.md` 第 9 节）。
+    对不上（见 `docs/design/container-findings.md` 第 9 节）。
     """
     import rdkquant.ui.pages.env as env_mod
     from rdkquant.core.images import RemoteInfo

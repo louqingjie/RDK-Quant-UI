@@ -8,7 +8,7 @@
 
 关于生成二进制校准数据，有一条**实测**得到的硬约束：产物必须是**无文件头的
 裸字节**，长度恰好 `W×H×C×itemsize`。放 `.npy` 会失败——工具按裸字节读，
-多出来的 128 字节文件头会被算进元素个数。详见 tests/fixtures/CONTAINER_FINDINGS.md。
+多出来的 128 字节文件头会被算进元素个数。详见 docs/design/container-findings.md。
 """
 
 from __future__ import annotations

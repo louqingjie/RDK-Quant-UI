@@ -617,7 +617,7 @@ class EnvPage(QWidget):
         """环境就绪后自动问一次远程体积。
 
         为什么值得自动做：清单里的 `size_hint_bytes` 是**某个时刻的快照**，
-        实测已经和服务器对不上（见 `tests/fixtures/CONTAINER_FINDINGS.md` 第 9 节），
+        实测已经和服务器对不上（见 `docs/design/container-findings.md` 第 9 节），
         而且 X3 两条原先根本没有体积，磁盘检查跑不起来。
         HEAD 请求不带 body，很便宜。
 

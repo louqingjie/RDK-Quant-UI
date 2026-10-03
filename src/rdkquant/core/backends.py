@@ -289,7 +289,7 @@ _MOCK_COMPILE = """\
 # 假后端返回的 JSON：**形状与真实探针完全一致**
 #
 # 这不是"随便编点数据"——test_backends.py 会拿这里和真实探针的契约对比，防止
-# 两边漂移。数值取自 X5 CPU 容器的实测环境（见 tests/fixtures/CONTAINER_FINDINGS.md）。
+# 两边漂移。数值取自 X5 CPU 容器的实测环境（见 docs/design/container-findings.md）。
 # --------------------------------------------------------------------------
 #: 假校准集张数。取 48 是因为它落在官方建议区间 20~100 之内，不必额外造警告。
 MOCK_CALIB_COUNT = 48

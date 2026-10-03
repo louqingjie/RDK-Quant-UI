@@ -3,11 +3,12 @@
 
 """仓库卫生：那些"踩过一次就不该再踩"的坑。
 
-这里守的不是功能，是**曾经真的把东西弄坏过**的两类问题。
+这里守的不是功能，是**曾经真的把东西弄坏过**的几类问题。
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -140,9 +141,9 @@ def _ui_python_files():
 def test_ui_text_has_no_stale_claims():
     """UI 里不能再出现**已经被证伪**的说法。
 
-    `docs/AGENTS.md` 把「文案和代码相反」列为最危险的一类：缺文档只是没人看，
-    **写反的文案会把人引向错误的修改**。本项目真实发生过两次，都是
-    **截图核对**发现的，不是测试：
+    「文案和代码相反」是最危险的一类问题：缺文档只是没人看，
+    **写反的文案会把人引向错误的修改**（见 [`docs/README.md`](../docs/README.md) 的「写法」）。
+    本项目真实发生过两次，都是**截图核对**发现的，不是测试：
 
     * 校准页卡片副标题写着「缩略图由容器生成」—— 早已搬到宿主机
     * `_evaluate()` 掉进兜底分支，对每个用户显示「容器里没有可用的图像库」
@@ -177,3 +178,77 @@ def test_stale_claim_scanner_actually_sees_strings():
         "**注释里的说明不该被算进去** —— 那句话在 calib.py 里是用来解释这个 bug 的，"
         "按整文件 grep 会把记录它的注释弄红"
     )
+
+
+# --------------------------------------------------------------------------
+# ⑤ Markdown 里的相对链接必须指向存在的文件
+# --------------------------------------------------------------------------
+#: `[文字](目标)` 或 `![alt](目标)`；目标里不含 `)`
+_MD_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+
+
+def _markdown_targets(path: Path):
+    """一份 Markdown 里的相对链接目标，`(行号, 目标)`。
+
+    跳过外部 URL 和纯锚点：那两类要么需要联网，要么本来就指向本文件。
+    """
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for raw in _MD_LINK.findall(line):
+            target = raw.split("#", 1)[0].strip()
+            if not target or "://" in target or target.startswith(("mailto:", "#")):
+                continue
+            yield line_no, target
+
+
+def _markdown_files():
+    for path in REPO.rglob("*.md"):
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        yield path
+
+
+def test_markdown_links_resolve():
+    """Markdown 里的相对链接必须指向**存在的文件**。
+
+    这条是给 `docs/` 的目录重构守的：**移动文件会改变相对链接的基准，
+    而链接断了没有任何报错**，只是点不过去。
+
+    本次重构就撞了四处，全靠手工 grep 才发现：
+
+    * `docs/qt-traps.md` 挪进 `pitfalls/` 之后，里面的 `../AGENTS.md` 少了一层
+    * `docs/commit-format.md` 挪进 `templates/` 之后同样（两处）
+    * 根 `AGENTS.md` 还链着挪走前的 `docs/qt-traps.md`
+
+    只查仓库内的相对路径 —— 外部 URL 需要联网，不在这里查。
+    """
+    offenders = [
+        f"{path.relative_to(REPO)}:{line_no} → {target}"
+        for path in _markdown_files()
+        for line_no, target in _markdown_targets(path)
+        if not (path.parent / target).resolve().exists()
+    ]
+    assert not offenders, (
+        "Markdown 里有指向不存在文件的链接：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_markdown_link_scanner_actually_sees_links():
+    """**自检：确认上面那条不是空跑。**
+
+    解析器写错（比如正则不匹配）的话，`test_markdown_links_resolve` 永远绿 ——
+    那是"看起来有门禁其实没有"。
+
+    阈值顺带守另一件事：**两个平台跑的是不是同一个仓库**。
+    实测撞过 —— `scripts/wsl-sync.sh` 原来不同步 `docs/` 和 `AGENTS.md`，
+    于是 Linux 侧只解析到 1 个链接，这条直接红了。见那边的注释。
+    """
+    targets = {
+        target
+        for path in _markdown_files()
+        for _line, target in _markdown_targets(path)
+    }
+    assert len(targets) > 5, (
+        f"只解析到 {len(targets)} 个链接（{sorted(targets)}）—— "
+        "要么解析器没生效，要么这份仓库拷贝不完整"
+    )
+    assert any("AGENTS.md" in t for t in targets), "根 AGENTS.md 被引用得最多，应当能解析到"

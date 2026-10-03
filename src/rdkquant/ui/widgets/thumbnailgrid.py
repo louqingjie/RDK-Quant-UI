@@ -273,7 +273,7 @@ class ThumbnailGrid(QListView):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         # ⚠️ `_sync_height()` **不能在这里调** —— 它要读 `self._model.rowCount()`，
         # 而 `self._model` 几行之后才创建。提前调就是构造期 AttributeError，
-        # 也就是 `docs/qt-traps.md` 里第 4、5 条那一类"看起来没报错其实没生效"
+        # 也就是 `docs/pitfalls/qt-traps.md` 里第 4、5 条那一类"看起来没报错其实没生效"
         # 的坑的近亲：这次倒是报了错，但报了 56 个。放到 `__init__` 末尾。
 
         self._model = ThumbnailModel(self)

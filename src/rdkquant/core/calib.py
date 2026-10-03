@@ -32,7 +32,7 @@ class CalibBuildSpec:
 
     默认**不做归一化**：官方把 `norm_type` 的均值/缩放插入到模型里，校准数据
     应当是 `input_type_train` 格式的原始像素。这一条已被真机实验确认
-    （见 tests/fixtures/CONTAINER_FINDINGS.md）。mean/scale 只在显式给出时应用。
+    （见 docs/design/container-findings.md）。mean/scale 只在显式给出时应用。
     """
 
     shape: str                       # 例如 "1x3x640x640"

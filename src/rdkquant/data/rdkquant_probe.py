@@ -746,7 +746,7 @@ def cmd_calib_build(argv):
     `--shape` 指定的目标尺寸，所以源目录分辨率参差不齐也没关系。
 
     ⚠️ 产物是**无文件头的裸字节**，长度必须恰好 W*H*C*itemsize。
-    实测（见 tests/fixtures/CONTAINER_FINDINGS.md）：`cal_data_dir` 不走 np.load，
+    实测（见 docs/design/container-findings.md）：`cal_data_dir` 不走 np.load，
     而是把文件当裸字节读、按 cal_data_type 重新解释。放 `.npy` 会失败，报
     "cannot reshape array of size N into shape ..."，N 里多出来的正是 128 字节文件头。
     **不要"优化"成 .npy。**
