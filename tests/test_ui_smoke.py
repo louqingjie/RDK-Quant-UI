@@ -460,6 +460,59 @@ def test_hiding_the_log_keeps_the_progress_bar_visible(shell, qapp, monkeypatch)
     assert shell.progress.isVisible()
 
 
+def test_grid_names_and_displayed_names_are_compared_by_stem(shell, tmp_path: Path):
+    """**回归**：网格里是缩略图 `.png`，`_displayed` 里是源文件 `.jpg`。
+
+    实测症状：点「生成」永远报「勾选与当前预览不一致，请重新勾选」，
+    而用户根本无从改起 —— 两边扩展名不同，集合比较**永远为假**。
+
+    这条测试把旧写法"永远为假"这件事也钉住，免得以后有人把 `_stems()` 改回去。
+    """
+    page = shell.stage_pages[2]                    # CalibPage
+
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    for name in ("0070", "0140"):
+        (thumbs / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    page.grid.set_images(thumbs)
+    page._displayed = ["0070.jpg", "0140.jpg"]     # 源文件名（缩略图是 .png）
+
+    checked = page.grid.checked_names()
+    assert checked == ["0070.png", "0140.png"]
+
+    # 旧写法：永远为假 → 每次都误报
+    assert not set(checked) <= set(page._displayed), (
+        "这就是旧写法的判断：.png vs .jpg，集合比较永远为假"
+    )
+    # 新写法：按不带扩展名的形式比
+    assert page._stems(checked) <= page._stems(page._displayed)
+
+
+def test_display_names_is_capped_at_the_grid_limit(shell):
+    """`_displayed` 必须和网格里**真实显示**的条目一致。
+
+    网格上限是 `MAX_TILES`。`count_box = 0`（全部）时若筛选结果超过上限，
+    以前 `_display_names()` 会返回全部名字 —— 于是 `_displayed` 说 1172 张，
+    而网格里只有 200 个，"勾选与预览是否一致"就在拿一个用户看不到的集合比。
+    """
+    from rdkquant.core.calibfilter import CalibStat
+    from rdkquant.ui.widgets.thumbnailgrid import MAX_TILES
+
+    page = shell.stage_pages[2]
+    page._stats = [
+        CalibStat(name=f"{i:05d}.jpg", size=1000, width=640, height=640)
+        for i in range(MAX_TILES * 3)
+    ]
+    page.count_box.setValue(0)                     # 0 = 全部用上
+
+    names = page._display_names()
+    assert len(names) == MAX_TILES
+    assert names[0] == "00000.jpg"
+    assert names[-1] != page._stats[MAX_TILES - 1].name, (
+        "超出上限时要**均匀采样**，不能只取前 N 个（那样永远只覆盖数据集开头）"
+    )
+
+
 def test_log_view_appends_and_roundtrips(qapp):
     from rdkquant.ui.widgets import LogView
 

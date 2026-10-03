@@ -44,6 +44,7 @@ from ...core.calibfilter import (
     filter_and_sample,
     load_stats,
     most_common_resolution,
+    sample_evenly,
 )
 from ...core.findings import LEVEL_ERROR, LEVEL_OK, Finding
 from ...core.workflow import RunContext
@@ -179,6 +180,28 @@ class CalibPage(StagePage):
         thumbs_card.add(self.filter_section)
 
         # 漏斗计数：一眼看清每一级剩多少
+        #
+        # 采样张数放在**筛选条件下面、预览上面** —— 它是"漏斗"的一环：
+        # 筛选 → 采样 → 预览 → 勾选。原来它在下面的「校准参数」卡片里，
+        # 于是用户筛完看到预览只有 50 张，不知道是谁砍的（实测反馈）。
+        #
+        # 上限就是网格能显示的张数：超过它就没法逐个勾选，是个隐藏的坑。
+        self.count_box = QSpinBox()
+        self.count_box.setRange(0, MAX_TILES)
+        self.count_box.setValue(50)
+        self.count_box.setSpecialValueText("全部")
+        self.count_box.setSuffix(" 张")
+        self.count_box.setToolTip(
+            "从筛完的结果里**均匀**取多少张来预览和挑选"
+            f"（0 = 全部用上，最多 {MAX_TILES} 张）。\n"
+            "均匀取样而不是随机：结果可复现，而且数据集通常按时间/场景排序，\n"
+            "间隔取样天然覆盖各个片段。"
+        )
+        self.count_box.valueChanged.connect(self._on_param_changed)
+        thumbs_card.add(
+            self._labelled("预览张数（从筛完的结果里均匀取）", self.count_box)
+        )
+
         self.funnel_label = self._hint_label("尚未扫描。")
         thumbs_card.add(self.funnel_label)
 
@@ -222,22 +245,7 @@ class CalibPage(StagePage):
         self.dtype_box.currentIndexChanged.connect(self._on_param_changed)
         params.add(self._labelled("数据类型 cal_data_type", self.dtype_box))
 
-        # 采样张数：官方建议 20~100 张，而真实数据集动辄几千张（实测一个装甲板数据集
-        # 有 3504 张、1474 种分辨率），必须能挑出有代表性的子集。
-        self.count_box = QSpinBox()
-        # 上限就是网格能显示的张数：超过它就无法逐个勾选，是个隐藏的坑。
-        # 官方建议 20~100，200 已经够宽。
-        self.count_box.setRange(0, MAX_TILES)
-        self.count_box.setValue(50)
-        self.count_box.setSpecialValueText("全部")
-        self.count_box.setSuffix(" 张")
-        self.count_box.setToolTip(
-            "从源目录里**均匀**取样多少张（0 = 全部用上）。\n"
-            "均匀取样而不是随机：结果可复现，而且数据集通常按时间/场景排序，\n"
-            "间隔取样天然覆盖各个片段。"
-        )
-        self.count_box.valueChanged.connect(self._on_param_changed)
-        params.add(self._labelled("采样张数", self.count_box))
+        # 「预览张数」在预览卡片里（漏斗的一环），不在这里 —— 见上面的说明。
 
         self.preprocess_box = QCheckBox(
             "preprocess_on —— 让工具自己 resize（官方建议保持关闭）"
@@ -336,12 +344,31 @@ class CalibPage(StagePage):
             self._stats, self.filter_spec(), duplicates=self._duplicates
         ).kept)
 
+    @staticmethod
+    def _stems(names) -> set[str]:
+        """把文件名统一成不带扩展名的形式再比较。
+
+        ⚠️ **必须这样比。** 网格里装的是**缩略图**（`0070.png`），而
+        `_displayed` 存的是**源文件名**（`0070.jpg`）。直接拿两边做集合比较
+        永远不相等 —— 实测症状就是：每次点「生成」都报
+        「勾选与当前预览不一致，请重新勾选」，而用户根本无从改起。
+        """
+        return {Path(n).stem for n in names}
+
     def _display_names(self) -> list[str]:
-        """筛选 + 采样之后，当前应当出现在网格里的名字。"""
-        result, names = filter_and_sample(
+        """筛选 + 采样之后，**实际会显示在网格里**的名字。
+
+        上限是 `MAX_TILES` —— 网格只放得下这么多。`_displayed` 必须和网格里
+        真实的条目一致，否则"勾选与预览是否一致"会拿一个用户根本看不到的集合去比。
+
+        超出时**均匀采样**而不是取前 N 个：取前 N 个会让预览永远只覆盖数据集的开头。
+        """
+        _result, names = filter_and_sample(
             self._stats, self.filter_spec(),
             count=self.count_box.value(), duplicates=self._duplicates,
         )
+        if len(names) > MAX_TILES:
+            names = sample_evenly(names, MAX_TILES)
         return names
 
     def _on_filter_changed(self) -> None:
@@ -372,17 +399,24 @@ class CalibPage(StagePage):
             why = result.explain()
             if why:
                 parts.append(f"（筛掉：{why}）")
-        parts.append(f"采样 {len(names)}")
+        # 预览数比筛选结果少时**要说清是谁砍的**，否则用户会以为筛错了。
+        # 两种原因：用户在「采样张数」里限了张数，或者网格本身放不下。
+        shown = len(names)
+        if kept > shown:
+            reason = "网格上限" if self.count_box.value() == 0 else "由「采样张数」决定"
+            parts.append(f"预览 {shown}（{reason}）")
+        else:
+            parts.append(f"预览 {shown}")
         if self._displayed:
             parts.append(f"已选 {checked}")
         self.funnel_label.setText(" → ".join(parts))
 
         if kept == 0 and self.filter_spec().active:
             self.funnel_label.setText(
-                f"共 {total} 张 → **筛选后 0 张**（筛掉：{result.explain()}）"
+                f"共 {total} 张 → 筛选后 0 张（筛掉：{result.explain()}）"
                 "。放宽条件试试。"
             )
-        if self._displayed and set(names) != set(self._displayed):
+        if self._displayed and self._stems(names) != self._stems(self._displayed):
             self.funnel_label.setText(
                 self.funnel_label.text() + "　⚠️ 条件已改，请点「应用筛选并刷新预览」"
             )
@@ -720,7 +754,7 @@ class CalibPage(StagePage):
         # 条件改过但没刷新预览时拒绝生成 —— 否则产物会和用户在预览里看到的不是一批，
         # 而他无从察觉。
         expected = self._display_names()
-        if self._displayed and set(expected) != set(self._displayed):
+        if self._displayed and self._stems(expected) != self._stems(self._displayed):
             self.log.append_line(
                 "[校准] 筛选条件已改但预览没刷新，先点「应用筛选并刷新预览」。"
             )
@@ -733,7 +767,9 @@ class CalibPage(StagePage):
                 "或者点「全选」。"
             )
             return
-        if self._displayed and not set(checked) <= set(self._displayed):
+        # 按**不带扩展名**的形式比：网格里是缩略图 `0070.png`，
+        # 而 `_displayed` 是源文件名 `0070.jpg`（见 _stems 的说明）
+        if self._displayed and not self._stems(checked) <= self._stems(self._displayed):
             self.log.append_line("[校准] 勾选与当前预览不一致，请重新勾选。")
             return
 
