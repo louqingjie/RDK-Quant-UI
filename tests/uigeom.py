@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QModelIndex, QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
     QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QLineEdit,
     QListView,
@@ -184,6 +186,69 @@ def check_no_repr_leak(root: QWidget) -> list[str]:
     return _summarize(problems)
 
 
+def _wheel_event() -> QWheelEvent:
+    """向上滚一格（`angleDelta.y = -120`）。"""
+    return QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase, False,
+    )
+
+
+def _input_value(widget):
+    return widget.currentIndex() if isinstance(widget, QComboBox) else widget.value()
+
+
+def _set_input_value(widget, value) -> None:
+    if isinstance(widget, QComboBox):
+        widget.setCurrentIndex(value)
+    else:
+        widget.setValue(value)
+
+
+def check_wheel_does_not_change_inputs(root: QWidget) -> list[str]:
+    """下拉框 / 数字框**不得因为滚轮而改值**。
+
+    页面本身是可滚动的（`StagePage` 外层就是 `QScrollArea`），光标扫过输入控件
+    就把取值改了 —— 用户想滚页面，结果改掉了一个筛选边界，而且**没有任何提示**。
+
+    实测（offscreen，送一个 `angleDelta.y = -120`）：
+
+        QComboBox  默认（WheelFocus）  0 → 1      accepted=True
+        QComboBox  + StrongFocus       0 → 1      accepted=True   ← **没用**
+        QComboBox  + wheelEvent忽略    0 → 0      ignored ✓
+        QSpinBox   默认                500 → 499  accepted=True
+
+    **只改 `setFocusPolicy(StrongFocus)` 不管用** —— 这一点我原本记反了，
+    是量出来的。修法见 `ui/widgets/inputs.py`。
+
+    判据用**行为**而不是 `isinstance`：装事件过滤器、或者别的写法，只要真的
+    不吃滚轮就该放行。
+
+    值真的被改了的那些会被**还原**（只在已经出错时发生，还原是为了别让一次
+    检查把界面状态搞乱）。
+    """
+    problems = []
+    for widget in root.findChildren(QWidget):
+        if not isinstance(widget, (QComboBox, QAbstractSpinBox)):
+            continue
+        if not widget.isEnabled():
+            continue                       # 禁用的本来就不响应
+        before = _input_value(widget)
+        event = _wheel_event()
+        QApplication.sendEvent(widget, event)
+        changed = _input_value(widget) != before
+        if changed:
+            _set_input_value(widget, before)
+        if event.isAccepted() or changed:
+            name = widget.objectName() or type(widget).__name__
+            problems.append(
+                f"{name} 会被滚轮改值（accepted={event.isAccepted()}，"
+                f"变了={changed}）—— 用 ui/widgets/inputs.py 里的 NoWheel* 替它"
+            )
+    return _summarize(problems)
+
+
 def check_all(view: QWidget) -> list[str]:
     """一次跑完所有检查，**包括嵌在里面的视图**。
 
@@ -205,4 +270,5 @@ def check_all(view: QWidget) -> list[str]:
 
     problems += check_interactive_widgets(view)
     problems += check_no_repr_leak(view)
+    problems += check_wheel_does_not_change_inputs(view)
     return problems

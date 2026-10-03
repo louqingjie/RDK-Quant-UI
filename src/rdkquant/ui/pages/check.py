@@ -18,13 +18,14 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QWidget
 
 from ...core.findings import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, Finding
 from ...core.logparse import parse_checker
 from ...core.workflow import RunContext
 from ..metrics import METRICS
 from ..widgets import Card, MetricTile, TableModel, Tone, make_table
+from ..widgets.inputs import NoWheelComboBox
 from .stage import StagePage
 
 NODE_HEADERS = ["节点", "设备", "子图", "类型", "ON"]
@@ -51,7 +52,7 @@ class CheckPage(StagePage):
         line = QHBoxLayout(row)
         line.setContentsMargins(0, 0, 0, 0)
         line.setSpacing(METRICS.space_2)
-        self.march_box = QComboBox()
+        self.march_box = NoWheelComboBox()
         for value, label in MARCHES:
             self.march_box.addItem(label, value)
         self.march_box.setToolTip(

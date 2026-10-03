@@ -18,14 +18,11 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +45,7 @@ from ...core.workflow import RunContext
 from .. import calibimages
 from ..metrics import METRICS
 from ..widgets import Card, CollapsibleSection, MetricTile, Tone
+from ..widgets.inputs import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
 from ..widgets.thumbnailgrid import ThumbnailGrid
 from .stage import StagePage
 
@@ -233,13 +231,13 @@ class CalibPage(StagePage):
 
         # ---- 参数 ----
         params = Card("校准参数", "这些值会写进第 4 步的 config.yaml")
-        self.type_box = QComboBox()
+        self.type_box = NoWheelComboBox()
         for value, label in CALIBRATION_TYPES:
             self.type_box.addItem(label, value)
         self.type_box.currentIndexChanged.connect(self._on_param_changed)
         params.add(self._labelled("校准方式 calibration_type", self.type_box))
 
-        self.dtype_box = QComboBox()
+        self.dtype_box = NoWheelComboBox()
         for value, label in CAL_DATA_TYPES:
             self.dtype_box.addItem(label, value)
         self.dtype_box.currentIndexChanged.connect(self._on_param_changed)
@@ -301,12 +299,14 @@ class CalibPage(StagePage):
         对宽高/大小/比例来说 0 都不是有效下限，所以这个约定没有歧义。
         """
         def make():
+            # ⚠️ 筛选上下限用**不吃滚轮**的框：页面本身能滚，光标扫过就改掉
+            # 一个筛选边界，而漏斗会立刻重算 —— 用户根本不知道发生了什么。
             if decimals:
-                box = QDoubleSpinBox()
+                box = NoWheelDoubleSpinBox()
                 box.setDecimals(decimals)
                 box.setSingleStep(step)
             else:
-                box = QSpinBox()
+                box = NoWheelSpinBox()
             box.setRange(low, high)
             box.setSpecialValueText("不限")
             box.valueChanged.connect(self._on_filter_changed)

@@ -1,7 +1,7 @@
 # Qt 陷阱
 
 改 `src/rdkquant/ui/` 之前扫一眼。**每条都真实踩过**，写的是"已经发生"。
-根文件 [`AGENTS.md`](../../AGENTS.md) 只列名字，这里放机制和怎么发现。
+每条给的是**机制和怎么发现的**，一句话结论在根 [`AGENTS.md`](../../AGENTS.md) 第 12 条。
 
 ---
 
@@ -113,8 +113,26 @@ PySide6 转不了：`Shiboken::Conversions::_pythonToCppCopy: Cannot copy-conver
 
 ---
 
+## 7. 滚轮会改掉下拉框 / 数字框的值
+
+`QComboBox` / `QSpinBox` / `QDoubleSpinBox` 出厂都是 `WheelFocus`，而且
+**滚轮事件照单全收**。页面本身能滚（`StagePage` 外层就是 `QScrollArea`），
+光标扫过就改掉一个筛选条件，**没有任何提示**。实测（`angleDelta.y = -120`）：
+
+    QComboBox  默认              0 → 1      accepted=True
+    QComboBox  + StrongFocus     0 → 1      accepted=True   ← **只改焦点策略没用**
+    QComboBox  + wheelEvent忽略  0 → 0      ignored ✓
+    QSpinBox   默认              500 → 499  accepted=True
+
+**修法**：子类覆写 `wheelEvent` 并 `event.ignore()` —— `ignore()` 不只是
+"不处理"，它让事件**继续往上传**给父级滚动区，所以滚轮照样滚页面，只是不再改值。
+见 `ui/widgets/inputs.py` 的 `NoWheel*`；门禁是 `tests/uigeom.py` 的
+`check_wheel_does_not_change_inputs`。
+
+---
+
 ## 一个反复出现的主题
 
-上面六条里有四条的共同点是：**出错时没有异常**，只是"看起来不对"
-（空表、少了一半、图不出来、越来越慢）。所以改 UI 之后**要看渲染结果**，
-不能只看"没报错"。
+上面七条里有五条的共同点是：**出错时没有异常**，只是"看起来不对"
+（空表、少了一半、图不出来、越来越慢、值被悄悄改了）。所以改 UI 之后
+**要看渲染结果**，不能只看"没报错"。

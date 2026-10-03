@@ -16,7 +16,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -51,6 +50,7 @@ from ..widgets import (
     fit_columns_to_content,
     make_table,
 )
+from ..widgets.inputs import NoWheelComboBox
 from ..workers import JobCoordinator, TaskRunner
 
 _LEVEL_TEXT = {LEVEL_OK: "通过", LEVEL_WARN: "警告", LEVEL_ERROR: "错误"}
@@ -251,7 +251,7 @@ class EnvPage(QWidget):
         picker_label.setObjectName("Muted")
         box.addWidget(picker_label)
 
-        self.image_box = QComboBox()
+        self.image_box = NoWheelComboBox()
         # 未选时显示这句（currentIndex == -1）。**故意不给默认选中项** ——
         # 见 _resolve_selection()：只自动选中"本机已经导入"的镜像。
         self.image_box.setPlaceholderText("请选择工具链镜像…")

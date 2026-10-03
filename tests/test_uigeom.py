@@ -21,6 +21,7 @@ from PySide6.QtCore import QPoint, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QIcon, QPixmap, QStandardItem, QStandardItemModel  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
+    QComboBox,
     QLabel,
     QListView,
     QPushButton,
@@ -220,6 +221,95 @@ def test_empty_view_reports_nothing(qapp):
 # --------------------------------------------------------------------------
 # check_all
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# check_wheel_does_not_change_inputs
+#
+# 实测（offscreen，送一个 angleDelta.y = -120）：
+#     QComboBox 默认  0 → 1  accepted=True
+#     QComboBox + StrongFocus 0 → 1  accepted=True   ← 只改焦点策略没用
+# --------------------------------------------------------------------------
+def test_wheel_check_catches_a_plain_combo(qapp):
+    """**裸的 `QComboBox` 必须被报出来** —— 这正是改之前的样子。"""
+    root = QWidget()
+    combo = QComboBox(root)
+    combo.addItems(["甲", "乙", "丙"])
+    root.show()
+    qapp.processEvents()
+
+    problems = uigeom.check_wheel_does_not_change_inputs(root)
+    assert problems, "默认的 QComboBox 会被滚轮改值，必须报出来"
+    assert "NoWheel" in problems[0], "提示里要给出修法"
+
+
+def test_wheel_check_passes_for_our_widgets(qapp):
+    """`ui/widgets/inputs.py` 里的三个都该放行。"""
+    from rdkquant.ui.widgets.inputs import (
+        NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox,
+    )
+
+    root = QWidget()
+    layout = QVBoxLayout(root)
+    combo = NoWheelComboBox(root)
+    combo.addItems(["甲", "乙", "丙"])
+    layout.addWidget(combo)
+
+    spin = NoWheelSpinBox(root)
+    spin.setRange(0, 100)
+    spin.setValue(50)
+    layout.addWidget(spin)
+
+    dspin = NoWheelDoubleSpinBox(root)
+    dspin.setRange(0, 100)
+    dspin.setValue(50)
+    layout.addWidget(dspin)
+
+    root.show()
+    qapp.processEvents()
+
+    assert uigeom.check_wheel_does_not_change_inputs(root) == []
+
+
+def test_wheel_check_catches_a_plain_spin_box(qapp):
+    """数字框一样有这个问题，不能只查下拉框。"""
+    from PySide6.QtWidgets import QSpinBox
+
+    root = QWidget()
+    box = QSpinBox(root)
+    box.setRange(0, 100)
+    box.setValue(50)
+    root.show()
+    qapp.processEvents()
+
+    assert uigeom.check_wheel_does_not_change_inputs(root), "裸 QSpinBox 必须被报出来"
+
+
+def test_wheel_check_leaves_values_alone_when_clean(qapp):
+    """检查本身不能把界面状态搞乱。"""
+    from rdkquant.ui.widgets.inputs import NoWheelSpinBox
+
+    root = QWidget()
+    box = NoWheelSpinBox(root)
+    box.setRange(0, 100)
+    box.setValue(42)
+    root.show()
+    qapp.processEvents()
+
+    uigeom.check_wheel_does_not_change_inputs(root)
+    assert box.value() == 42
+
+
+def test_wheel_check_skips_disabled_widgets(qapp):
+    """禁用的控件本来就不响应滚轮，不该报。"""
+    root = QWidget()
+    combo = QComboBox(root)
+    combo.addItems(["甲", "乙"])
+    combo.setEnabled(False)
+    root.show()
+    qapp.processEvents()
+
+    assert uigeom.check_wheel_does_not_change_inputs(root) == []
+
+
 def test_check_all_is_clean_for_a_healthy_view(qapp):
     assert uigeom.check_all(_icon_view(qapp)) == []
 
