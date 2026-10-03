@@ -18,7 +18,7 @@
       "url": "https://d-robotics-aitoolchain.oss-cn-beijing.aliyuncs.com/oe_x5/1.2.8/docker_openexplorer_ubuntu_20_x5_cpu_v1.2.8.tar.gz",
       "image_ref_hint": "openexplorer/ai_toolchain_ubuntu_20_x5_cpu:v1.2.8-py310",
       "size_hint_bytes": 1815507981,
-      "note": "官方文档推荐的默认选择；无 NVIDIA 显卡时用这个。tag 带 -py310 是实测的，不是 v1.2.8。"
+      "note": "官方推荐的默认选择。无 NVIDIA 显卡时用这个。"
     },
     {
       "id": "x5-1.2.8-gpu",
@@ -31,7 +31,7 @@
       "url": "https://d-robotics-aitoolchain.oss-cn-beijing.aliyuncs.com/oe_x5/1.2.8/docker_openexplorer_ubuntu_20_x5_gpu_v1.2.8.tar.gz",
       "image_ref_hint": "openexplorer/ai_toolchain_ubuntu_20_x5_gpu:v1.2.8-py310",
       "size_hint_bytes": 11066222691,
-      "note": "需要 NVIDIA 显卡 + nvidia-container-toolkit；解压后占用约 20 GB 以上，注意磁盘。"
+      "note": "需要 NVIDIA 显卡。导入后占用 20 GB 以上，注意磁盘空间。"
     },
     {
       "id": "x3-2.6.6-cpu",

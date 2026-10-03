@@ -49,7 +49,7 @@ def _fake_report() -> HostReport:
     report.recommended_shm_bytes = 4 * GB
     report.findings = [
         Finding(LEVEL_ERROR, "DOCKER_CLI_MISSING", "未安装 Docker 命令行", "去装 Docker"),
-        Finding(LEVEL_OK, "RAM_OK", "内存 16.0 GB，建议 --shm-size=4.0g"),
+        Finding(LEVEL_OK, "RAM_OK", "内存充足：16.0 GB"),
     ]
     return report
 

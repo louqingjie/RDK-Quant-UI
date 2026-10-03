@@ -57,12 +57,16 @@ class Card(QFrame):
         self._title.setFont(font_with_delta(self.font(), m.font_delta_title, bold=True))
         titles.addWidget(self._title)
 
-        # 官方依据这个小标签是"严谨符合官方流程"在界面上的可见证据
-        self._ref = QLabel(f"官方依据：{official_ref}" if official_ref else "")
-        self._ref.setObjectName("Muted")
-        self._ref.setFont(font_with_delta(self.font(), m.font_delta_small))
-        self._ref.setVisible(bool(official_ref))
-        titles.addWidget(self._ref)
+        # ⚠️ 「官方依据：4.1.1.3 …」**不显示出来**。
+        #
+        # 那是我们证明"流程严格对应官方文档"的脚手架（见 core/workflow.py 的
+        # 模块注释），是**给自己看的**，不是给用户看的：每张卡片都挂一行章节号，
+        # 用户读到的是噪音，不是信息。
+        #
+        # 改成标题的 tooltip —— 想核对官方章节的人悬停就能看到，不占版面。
+        if official_ref:
+            self._title.setToolTip(f"对应官方文档：{official_ref}")
+        self.official_ref = official_ref
 
         self._subtitle = QLabel(subtitle)
         self._subtitle.setObjectName("SectionHint")
@@ -72,7 +76,7 @@ class Card(QFrame):
 
         # 与 MetricTile 同样的理由：文字标签接受任意宽度并被裁剪，
         # 而不是按 minimumSizeHint 撑开父容器（Qt 不裁剪子控件，会越界画到邻居上）。
-        for label in (self._title, self._ref, self._subtitle):
+        for label in (self._title, self._subtitle):
             label.setSizePolicy(
                 QSizePolicy.Policy.Ignored, label.sizePolicy().verticalPolicy()
             )
@@ -118,8 +122,9 @@ class Card(QFrame):
         self._subtitle.setVisible(bool(text))
 
     def set_official_ref(self, text: str) -> None:
-        self._ref.setText(f"官方依据：{text}" if text else "")
-        self._ref.setVisible(bool(text))
+        """给标题挂上"对应官方文档"的提示。**不显示成可见文字** —— 见 __init__。"""
+        self.official_ref = text
+        self._title.setToolTip(f"对应官方文档：{text}" if text else "")
 
     def hide_header(self) -> None:
         self._header.setVisible(False)

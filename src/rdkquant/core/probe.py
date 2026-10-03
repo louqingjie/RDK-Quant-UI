@@ -517,12 +517,13 @@ def probe_host(
             )
         )
     elif report.ram.total_bytes:
+        # 不提 `--shm-size`：那是 Docker 的参数，而且**由本工具自动设置**，
+        # 让用户"照着建议去填"只会让人困惑（往哪填？）。
         f.append(
             Finding(
                 LEVEL_OK,
                 "RAM_OK",
-                f"内存 {report.ram.total_bytes / GB:.1f} GB，"
-                f"建议 --shm-size={report.recommended_shm_bytes / GB:.1f}g",
+                f"内存充足：{report.ram.total_bytes / GB:.1f} GB",
             )
         )
 

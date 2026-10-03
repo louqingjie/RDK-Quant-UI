@@ -187,9 +187,7 @@ class EnvPage(QWidget):
             "① 环境体检",
             official_ref="环境部署（工具链首次使用做一遍）",
         )
-        card.set_subtitle(
-            "UI 跑在宿主机、量化跑在容器里，所以「为什么跑不起来」的原因九成在环境上。"
-        )
+        card.set_subtitle("检查宿主机能否跑量化：Docker、显卡、磁盘、内存。")
 
         # 结论用大字号摆出来，而不是让人去表里找
         tiles = QHBoxLayout()
@@ -232,8 +230,8 @@ class EnvPage(QWidget):
             official_ref="环境部署 · 官方离线包（非 docker pull）",
         )
         card.set_subtitle(
-            "官方只提供离线 tar.gz。流程是：下载 → docker load 导入 → 从输出里解析真实镜像名。"
-            "支持断点续传，中断后可继续。"
+            "官方只提供离线包，不能用 docker pull 拉取。下载后自动导入，"
+            "支持断点续传。"
         )
 
         # ── 选择：下拉栏 ──
@@ -342,11 +340,7 @@ class EnvPage(QWidget):
 
         report = self.report
         if report.ram.total_bytes:
-            self.log.append_line(
-                f"[体检] 内存 {report.ram.total_bytes / GB:.1f} GB，"
-                f"建议 --shm-size={report.recommended_shm_bytes / GB:.1f}g"
-                f"（官方示例的 15g 在 16 GB 机器上会拖死系统）"
-            )
+            self.log.append_line(f"[体检] 内存 {report.ram.total_bytes / GB:.1f} GB")
         for finding in report.findings:
             if finding.level == LEVEL_ERROR:
                 self.log.append_line(f"[体检] {finding.message}")

@@ -64,8 +64,8 @@ class CheckPage(StagePage):
         line.addStretch(1)
         card.add(row)
         card.add(self._hint_label(
-            "检查阶段会顺带做一次编译并给出 FPS / 延迟估算。官方口径：这里不必"
-            "纠结回落 CPU 的算子，真实开销要看性能评估里的逐节点耗时。"
+            "会顺带做一次编译，给出 FPS / 延迟估算。"
+            "回落到 CPU 的算子不影响能否量化，真实耗时看性能评估的逐节点数据。"
         ))
         self.body.addWidget(card)
 
