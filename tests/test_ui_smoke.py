@@ -406,6 +406,42 @@ def test_probed_size_reaches_the_detail_line(shell, qapp, monkeypatch):
     assert "1.40 GB" in detail, f"详情行没跟上真实体积：{detail}"
 
 
+def test_disk_verdict_shows_in_the_picker_before_choosing(shell, monkeypatch):
+    """磁盘判断要在**选择处**就能看到，而不是选完再被结论页告知。
+
+    同时验证一条刻意的取舍：**已导入的镜像不加磁盘提示** ——
+    它不用再下载，下载体积与这个决定无关。
+    """
+    import rdkquant.ui.pages.env as env_mod
+    from rdkquant.core.probe import DiskStatus
+
+    GB = 1024 ** 3
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    report.disk = DiskStatus("C:\\", 500 * GB, 8 * GB)      # 只够装 CPU 版
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    monkeypatch.setattr(env_mod.img, "local_images", lambda: [])
+
+    page = shell.env_page
+    page.refresh_report()
+
+    texts = [page.image_box.itemText(i) for i in range(page.image_box.count())]
+    gpu = next(t for t in texts if "GPU" in t and "X5" in t)
+    cpu = next(t for t in texts if "CPU" in t and "X5" in t)
+    assert "磁盘不够" in gpu, f"装不下要在选项里就说：{gpu}"
+    assert "还差" in gpu, "要说清还差多少"
+    assert "磁盘" in cpu and "不够" not in cpu, f"CPU 版应当只是偏紧：{cpu}"
+
+    # 已导入的镜像不再需要下载 → 不该出现磁盘提示
+    monkeypatch.setattr(env_mod.img, "local_images", lambda: [page.specs[0].image_ref_hint])
+    monkeypatch.setattr(env_mod.img, "find_loaded", lambda *a, **k: "img:tag")
+    page.refresh_local()
+    page.refresh_report()
+    first = page.image_box.itemText(0)
+    assert "已导入" in first
+    assert "磁盘" not in first, f"已导入的不该有磁盘提示：{first}"
+
+
 def test_auto_probe_is_skipped_when_docker_is_down(shell, qapp, monkeypatch):
     """Docker 没起来就不该发请求。
 

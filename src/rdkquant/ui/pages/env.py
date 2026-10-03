@@ -29,7 +29,15 @@ from PySide6.QtWidgets import (
 )
 
 from ...core import images as img
-from ...core.probe import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, GB, HostReport, probe_host
+from ...core.probe import (
+    GB,
+    LEVEL_ERROR,
+    LEVEL_OK,
+    LEVEL_WARN,
+    HostReport,
+    disk_verdict,
+    probe_host,
+)
 from ...core.workflow import RunContext
 from ..metrics import METRICS, font_with_delta
 from ..palette import semantic_colors
@@ -367,18 +375,50 @@ class EnvPage(QWidget):
     # ------------------------------------------------------------------
     # 镜像下拉栏
     # ------------------------------------------------------------------
+    def _disk_verdict(self, present: str | None, size: int | None):
+        """按当前剩余空间算这个镜像装不装得下；返回 DiskVerdict 或 None。
+
+        **用的就是体检那份实现**（`core/probe.py: disk_verdict`），
+        不在这里另写一套阈值 —— 两处各写一份，迟早漂移成
+        "结论说不够、下拉栏说够"。
+        """
+        report = self.report
+        if not size or report is None:
+            return None
+        return disk_verdict(report.disk.free_bytes, size)
+
+    def _disk_suffix(self, present: str | None, size: int | None) -> str:
+        """选项文字末尾的磁盘提示。
+
+        目的是让用户**按下去之前**就知道装不装得下，而不是选完再被结论页告知。
+
+        两条刻意的取舍：
+
+        * **已经导入的镜像不加提示** —— 它不用再下载，下载体积与这个决定无关。
+        * **不"禁止"选不下的镜像**。磁盘需求是 `size × 2.2` 的**估算**（±15%），
+          拿估算值堵死用户的选择会误伤；而且剩余空间是移动靶（他可能先选中、
+          清完盘再下）。给信息，不夺选择权。
+        """
+        if present:
+            return ""
+        verdict = self._disk_verdict(present, size)
+        if verdict is None or verdict.ok or not verdict.short:
+            return ""
+        return f"　·　⚠️ {verdict.short}"
+
     def _combo_text(self, spec: img.ImageSpec, present: str | None, size: int | None) -> str:
         """下拉栏里的一行。
 
-        **决定选择的信息必须在选项文字里**（本机有没有、要下多少）——
-        藏到下面的详情里就还得点一遍才知道哪个已经装好了。
+        **决定选择的信息必须在选项文字里**（本机有没有、要下多少、装不装得下）——
+        藏到下面的详情里就还得点一遍才知道。
         """
         if present:
-            return f"{spec.display_name}　·　已导入"
-        if size:
-            return f"{spec.display_name}　·　需下载 {img.human_bytes(size)}"
-        # 清单里 X3 两个镜像没有体积（官方没给），别写成"需下载 （体积未知）"那种半截话
-        return f"{spec.display_name}　·　需下载（体积未知，可先查询）"
+            base = f"{spec.display_name}　·　已导入"
+        elif size:
+            base = f"{spec.display_name}　·　需下载 {img.human_bytes(size)}"
+        else:
+            base = f"{spec.display_name}　·　需下载（体积未知，可先查询）"
+        return base + self._disk_suffix(present, size)
 
     @staticmethod
     def _detail_text(spec: img.ImageSpec, present: str | None, size: int | None) -> str:
@@ -424,9 +464,18 @@ class EnvPage(QWidget):
                 size = self._remote_sizes.get(spec.id) or spec.size_hint_bytes
                 present = img.find_loaded(spec.image_ref_hint, self.local)
                 self.image_box.addItem(self._combo_text(spec, present, size))
+                # tooltip 放完整信息：阈值判定 + 官方说明，鼠标停一下就能看全
+                verdict = self._disk_verdict(present, size)
+                tooltip = self._detail_text(spec, present, size)
+                if verdict is not None and not verdict.ok:
+                    tooltip += f"\n⚠️ {verdict.message}"
+                    if verdict.hint:
+                        tooltip += f"\n   {verdict.hint}"
+                if spec.note:
+                    tooltip += f"\n{spec.note}"
                 self.image_box.setItemData(
                     self.image_box.count() - 1,
-                    self._detail_text(spec, present, size) + (f"\n{spec.note}" if spec.note else ""),
+                    tooltip,
                     Qt.ItemDataRole.ToolTipRole,
                 )
             # 恢复上次的选择，或在"没什么可决定"时自动选一个（见下）

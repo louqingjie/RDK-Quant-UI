@@ -26,6 +26,94 @@ from .findings import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, Finding  # noqa: F401
 
 GB = 1024 ** 3
 
+#: 导入镜像时的体积膨胀系数：`docker load` 期间**压缩包和解压后的层会同时存在**，
+#: 所以占用的不是压缩包大小本身。实测经验是 2~2.5 倍。
+#: ⚠️ 这是**估算**，不要拿它当精确值，也不要用它去做不可撤销的拦截。
+IMAGE_EXPANSION_FACTOR = 2.2
+
+#: 中间产物（校准缓存、量化模型、日志）建议额外预留的余量
+WORKSPACE_HEADROOM_BYTES = 10 * GB
+
+
+@dataclass(frozen=True)
+class DiskVerdict:
+    level: str
+    code: str
+    message: str
+    hint: str = ""
+    #: 给下拉栏那种窄地方用的一句话；没问题时为空
+    short: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.level == LEVEL_OK
+
+
+def image_footprint(size_bytes: int | None) -> int | None:
+    """导入一个镜像大约要占多少磁盘（下载 + 解压同时存在）。"""
+    if not size_bytes:
+        return None
+    return int(size_bytes * IMAGE_EXPANSION_FACTOR)
+
+
+def disk_verdict(
+    free_bytes: int,
+    need_bytes: int | None,
+    *,
+    path: str = "磁盘",
+    label: str = "所选镜像",
+) -> DiskVerdict | None:
+    """磁盘判定。**唯一实现** —— 体检结论和界面提示都走这里。
+
+    两处各写一份阈值，迟早漂移成"结论说不够、下拉栏说够"。
+
+    返回 `None` 表示"没什么要说的"：不指定目标镜像且磁盘宽裕时，连一条 OK 结论
+    都不产生 —— 容量已经在汇总表里显示了，不必再占一行。
+    """
+    if need_bytes:
+        estimate = image_footprint(need_bytes)
+        if free_bytes < estimate:
+            return DiskVerdict(
+                LEVEL_ERROR, "DISK_INSUFFICIENT",
+                f"磁盘空间不足：{path} 剩余 {free_bytes / GB:.1f} GB，"
+                f"而 {label} 约需 {estimate / GB:.1f} GB"
+                f"（下载 {need_bytes / GB:.1f} GB + 导入解压）",
+                "清理磁盘、把 Docker 的镜像存储目录改到大容量分区，"
+                "或改用 CPU 版镜像（1.7 GB）。",
+                f"磁盘不够（还差 {(estimate - free_bytes) / GB:.1f} GB）",
+            )
+        if free_bytes < estimate + WORKSPACE_HEADROOM_BYTES:
+            return DiskVerdict(
+                LEVEL_WARN, "DISK_TIGHT",
+                f"磁盘偏紧：剩余 {free_bytes / GB:.1f} GB，"
+                f"本次约需 {estimate / GB:.1f} GB",
+                f"建议预留额外的 {WORKSPACE_HEADROOM_BYTES / GB:.0f} GB "
+                "给中间产物（校准缓存、量化模型、日志）。",
+                "磁盘偏紧",
+            )
+        return DiskVerdict(
+            LEVEL_OK, "DISK_OK", f"磁盘充足，剩余 {free_bytes / GB:.1f} GB"
+        )
+
+    if free_bytes < WORKABLE_DISK_BYTES:
+        # 不知道目标镜像时也要拦住明显不够的情况。原来的写法在这里只给 WARN，
+        # 于是 C: 只剩 1.8 GB 时结论仍是"可以执行量化"——实测在真机上撞到。
+        return DiskVerdict(
+            LEVEL_ERROR, "DISK_INSUFFICIENT",
+            f"磁盘空间不足：{path} 只剩 {free_bytes / GB:.1f} GB，"
+            f"而最小的 CPU 镜像（1.7 GB 压缩包）下载 + 解压就要约 3.7 GB",
+            "清理磁盘，或把 Docker 的镜像存储目录改到大容量分区。",
+            "磁盘不足",
+        )
+    if free_bytes < 20 * GB:
+        return DiskVerdict(
+            LEVEL_WARN, "DISK_TIGHT",
+            f"磁盘剩余仅 {free_bytes / GB:.1f} GB",
+            "GPU 版镜像解压后可能超过 20 GB，请预留空间或选用 CPU 版。",
+            "磁盘偏紧",
+        )
+    return None
+
 #: 不指定目标镜像时的磁盘底线。
 #: 最小值来自最小的 CPU 镜像：1.69 GB 压缩包，下载 + 解压经验上要 2.2 倍 ≈ 3.7 GB；
 #: 再加校准数据、量化产物与日志。低于这个数**什么都做不了**，所以判 ERROR 而不是 WARN。
@@ -410,56 +498,12 @@ def probe_host(
         )
 
     # --- 磁盘 ---
-    free = report.disk.free_bytes
-    need = required_image_bytes
-    if need:
-        # 压缩包 + 解压后的镜像层，经验上要 2~2.5 倍
-        estimate = int(need * 2.2)
-        if free < estimate:
-            f.append(
-                Finding(
-                    LEVEL_ERROR,
-                    "DISK_INSUFFICIENT",
-                    f"磁盘空间不足：{report.disk.path} 剩余 {free / GB:.1f} GB，"
-                    f"而 {required_image_name or '所选镜像'} 约需 {estimate / GB:.1f} GB"
-                    f"（下载 {need / GB:.1f} GB + 导入解压）",
-                    "清理磁盘、把 Docker 的镜像存储目录改到大容量分区，或改用 CPU 版镜像（1.7 GB）。",
-                )
-            )
-        elif free < estimate + 10 * GB:
-            f.append(
-                Finding(
-                    LEVEL_WARN,
-                    "DISK_TIGHT",
-                    f"磁盘偏紧：剩余 {free / GB:.1f} GB，本次约需 {estimate / GB:.1f} GB",
-                    "建议预留额外的 10 GB 给中间产物（校准缓存、量化模型、日志）。",
-                )
-            )
-        else:
-            f.append(
-                Finding(LEVEL_OK, "DISK_OK", f"磁盘充足，剩余 {free / GB:.1f} GB")
-            )
-    elif free < WORKABLE_DISK_BYTES:
-        # 不知道目标镜像时也要拦住明显不够的情况。原来的写法在这里只给 WARN，
-        # 于是 C: 只剩 1.8 GB 时结论仍是"可以执行量化"——实测在真机上撞到。
-        f.append(
-            Finding(
-                LEVEL_ERROR,
-                "DISK_INSUFFICIENT",
-                f"磁盘空间不足：{report.disk.path} 只剩 {free / GB:.1f} GB，"
-                f"而最小的 CPU 镜像（1.7 GB 压缩包）下载 + 解压就要约 3.7 GB",
-                "清理磁盘，或把 Docker 的镜像存储目录改到大容量分区。",
-            )
-        )
-    elif free < 20 * GB:
-        f.append(
-            Finding(
-                LEVEL_WARN,
-                "DISK_TIGHT",
-                f"磁盘剩余仅 {free / GB:.1f} GB",
-                "GPU 版镜像解压后可能超过 20 GB，请预留空间或选用 CPU 版。",
-            )
-        )
+    verdict = disk_verdict(
+        report.disk.free_bytes, required_image_bytes,
+        path=report.disk.path, label=required_image_name or "所选镜像",
+    )
+    if verdict is not None:
+        f.append(Finding(verdict.level, verdict.code, verdict.message, verdict.hint))
 
     # --- 内存 ---
     if 0 < report.ram.total_bytes < 8 * GB:
