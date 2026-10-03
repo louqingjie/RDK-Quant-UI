@@ -373,6 +373,54 @@ def test_exposure_does_not_cost_a_second_decode(qapp, tmp_path: Path):
     assert baseline < 3.0, f"40 张缩略图花了 {baseline:.2f} 秒，太慢了"
 
 
+def test_load_thumbnail_returns_image_and_exposure(qapp, tmp_path: Path):
+    """单张解码入口：缩略图 + 曝光一次拿到。
+
+    这是「随滚动随生成」的工作单元。曝光和缩略图共用同一次解码，所以几乎免费。
+    """
+    path = tmp_path / "x.png"
+    image = QImage(400, 300, QImage.Format.Format_RGB32)
+    image.fill(QColor(128, 128, 128))
+    image.save(str(path), "PNG")
+
+    loaded = calibimages.load_thumbnail(path, size=96)
+    assert loaded is not None
+    thumb, exposure = loaded
+    assert thumb.width() == 96
+    assert 125 < exposure.mean < 131
+
+
+def test_load_thumbnail_does_not_upscale(qapp, tmp_path: Path):
+    path = tmp_path / "small.png"
+    image = QImage(62, 77, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    image.save(str(path), "PNG")
+
+    thumb, _ = calibimages.load_thumbnail(path, size=96)
+    assert (thumb.width(), thumb.height()) == (62, 77)
+
+
+def test_load_thumbnail_on_bad_file(qapp, tmp_path: Path):
+    bad = tmp_path / "bad.png"
+    bad.write_bytes(b"not an image")
+    assert calibimages.load_thumbnail(bad) is None
+
+
+def test_load_thumbnail_produces_qimage_not_pixmap(qapp, tmp_path: Path):
+    """**必须只产出 QImage。**
+
+    它要在工作线程里跑，而 `QPixmap`/`QIcon` 只能在 GUI 线程创建。
+    哪天有人为了"少一次转换"把它改成返回 QIcon，这条会红。
+    """
+    from PySide6.QtGui import QImage, QPixmap
+
+    path = tmp_path / "x.png"
+    make_png(path, 40, 40)
+    thumb, _ = calibimages.load_thumbnail(path)
+    assert isinstance(thumb, QImage)
+    assert not isinstance(thumb, QPixmap)
+
+
 # --------------------------------------------------------------------------
 # 清理
 # --------------------------------------------------------------------------

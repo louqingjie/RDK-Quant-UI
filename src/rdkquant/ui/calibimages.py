@@ -147,6 +147,38 @@ def measure_exposure(image: QImage) -> Exposure:
     return Exposure(total / count, near_black / count, near_white / count)
 
 
+def _scaled(image: QImage, size: int) -> QImage:
+    """缩到 `size` 见方。**只缩不放**。
+
+    和容器版 PIL 的 `thumbnail()` 语义一致。`QImage.scaled()` 默认会把小图
+    **放大**到贴着目标框 —— 实测差得很明显：源图 62×77 在容器版里还是 62×77，
+    在 Qt 版里被拉到 77×96。小图放大只会糊，而且同屏格子大小不一。
+    """
+    if image.width() > size or image.height() > size:
+        return image.scaled(
+            QSize(size, size),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return image
+
+
+def load_thumbnail(path: Path, size: int = 96) -> tuple[QImage, Exposure] | None:
+    """解码一张图 → (缩略图, 曝光)。读不出返回 `None`。
+
+    ⚠️ **只产出 `QImage`，绝不碰 `QPixmap` / `QIcon`** —— 这个函数要在
+    **工作线程**里跑，而 `QPixmap` 只能在 GUI 线程创建（Qt 的硬约束）。
+    主线程拿到 `QImage` 之后再转成 `QIcon`。
+
+    曝光和缩略图共用同一次解码，所以**几乎免费**。
+    """
+    image = QImage(str(path))
+    if image.isNull():
+        return None
+    thumb = _scaled(image, size)
+    return thumb, measure_exposure(thumb)
+
+
 @dataclass
 class ThumbnailResult:
     generated: int = 0
@@ -187,18 +219,8 @@ def build_thumbnails(
             result.unreadable.append(path.name)
             continue
         # ⚠️ **只缩不放**：和容器版 PIL 的 `thumbnail()` 语义一致。
-        #
-        # `QImage.scaled()` 会把小图**放大**到贴着 96 —— 实测差得很明显：
-        # 源图 62×77 在容器版里还是 62×77，在 Qt 版里被拉到 77×96。
-        # 小图放大只会糊，而且同一屏里格子大小不一，看着更乱。
-        if image.width() > size or image.height() > size:
-            thumb = image.scaled(
-                QSize(size, size),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        else:
-            thumb = image
+        # 见 `_scaled()` 里记的那次实测差异。
+        thumb = _scaled(image, size)
         # 顺手算曝光：像素已经解码了，这一步几乎免费
         result.exposure[path.name] = measure_exposure(thumb)
         target = out_dir / f"{path.stem}.png"
