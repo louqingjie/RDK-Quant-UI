@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core import containerops
 from ...core.calib import (
     CalibBuildSpec,
     evaluate_probe,
@@ -42,7 +41,6 @@ from ...core.calibfilter import (
     apply_filter,
     duplicate_names,
     filter_and_sample,
-    load_stats,
     most_common_resolution,
     sample_evenly,
 )
@@ -654,26 +652,69 @@ class CalibPage(StagePage):
         emit_line(f"[校准] 已收进工作区：{copied} 张 → cal_images/")
         return target
 
+    @staticmethod
+    def _as_payload(result, staged) -> dict:
+        """把宿主扫描结果拼成**和探针回包同形状**的 dict。
+
+        这样 `core/calib.py` 的判定逻辑（`evaluate_probe`）一行都不用改 ——
+        它只认这个形状。换数据来源不该顺带换判定逻辑。
+        """
+        counts: dict[tuple[int, int], int] = {}
+        for stat in result.stats:
+            if stat.width and stat.height:
+                key = (stat.width, stat.height)
+                counts[key] = counts.get(key, 0) + 1
+        resolutions = [
+            {"width": w, "height": h, "count": c}
+            for (w, h), c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ]
+        return {
+            "ok": True,
+            "directory": str(staged),
+            "count": result.total,
+            "image_like": result.image_like,
+            "binary_like": result.binary_like,
+            "resolutions": resolutions,
+            "duplicates": result.duplicates,
+            # 曝光不再来自这里：改成逐张、在生成缩略图时算（见 _exposure）
+            "exposure": None,
+            "problems": [],
+            "warnings": [
+                f"{len(result.unreadable)} 张读不出尺寸（格式不支持或文件损坏）"
+            ] if result.unreadable else [],
+            "_staged": str(staged),
+        }
+
     def _on_scan(self) -> None:
-        backend = self.backend()
-        if backend is None:
-            self.log.append_line("[提示] " + self.environment_hint())
-            return
+        """扫描校准目录。**在宿主机上做，不跑容器。**
+
+        原来这一步要 `docker run`，因为宿主机"没有图像库"。实测 3504 张：
+        容器 18.0 秒 → 宿主机文件头解析 **0.6 秒**（32x），而且模式、宽高
+        与容器侧 PIL 逐张零不一致。
+
+        真正需要容器的只剩「生成校准数据」那一步（字节契约在消费它的
+        环境里校验）。
+        """
         source = Path(self.directory)
-        shape = self._suggested("input_shape")
-        dtype = self.dtype_box.currentData()
 
         def job(emit_line, emit_progress, cancel):
             staged = self._stage(source, emit_line, emit_progress, cancel)
             if staged is None:
                 return {"ok": False, "error": f"目录不可用：{source}"}
-            payload = backend.scan_calib(
-                staged, shape=shape, dtype=dtype, want_stats=True,
-                on_line=emit_line, cancel=cancel,
+
+            def on_progress(done: int, total: int) -> None:
+                emit_progress(int(done * 100 / max(1, total)), f"扫描 {done}/{total}")
+
+            emit_line(f"[校准] 扫描 {staged}")
+            result = calibimages.scan(
+                staged, on_progress=on_progress, cancel=cancel.is_set,
             )
-            # 缩略图**不在这里做**：它改成宿主机 Qt 生成了（见 _on_scanned），
-            # 而且要先有逐张统计才知道该画哪几张。
-            payload["_staged"] = str(staged)
+            emit_line(
+                f"[校准] 共 {result.total} 张（图片 {result.image_like}、"
+                f"二进制 {result.binary_like}），重复 {len(result.duplicates)} 组"
+            )
+            payload = self._as_payload(result, staged)
+            payload["_stats"] = result.stats
             return payload
 
         self.start(job, self._on_scanned, label="校准")
@@ -692,19 +733,14 @@ class CalibPage(StagePage):
             self._staged = Path(staged)
         self._duplicates = list(payload.get("duplicates") or [])
 
-        # 读逐张统计（容器写在 <ws>/.rdkquant/calib-stats.json）。
-        # **这是全部图片的统计，不受回包 files 的 500 条上限影响** ——
-        # 筛选必须看到全量，否则会作用在一个偏斜的子集上。
-        self._stats = []
-        try:
-            self._stats = load_stats(containerops.stats_path(self.workspace))
-            # 上一次失败可能把筛选区禁用了，成功时要恢复 —— 否则修好之后
-            # 界面还是灰的，用户会以为功能坏了（踩过）
-            self.filter_section.setEnabled(True)
-        except Exception as exc:
-            # 读不出来时筛选不可用，但聚合结果仍然有效，不该整页报废
-            self.log.append_line(f"[筛选] 逐张统计不可用（{exc}），筛选已禁用")
-            self.filter_section.setEnabled(False)
+        # 逐张统计来自**宿主扫描**（`calibimages.scan`），不再是
+        # `<ws>/.rdkquant/calib-stats.json`。全量、不受回包 500 条上限影响。
+        self._stats = list(payload.get("_stats") or [])
+        # 上一次失败可能把筛选区禁用了，成功时要恢复 —— 否则修好之后
+        # 界面还是灰的，用户会以为功能坏了（踩过）
+        self.filter_section.setEnabled(bool(self._stats))
+        if not self._stats:
+            self.log.append_line("[筛选] 没有读到逐张统计，筛选已禁用")
 
         self._evaluate()
         names = self._display_names()

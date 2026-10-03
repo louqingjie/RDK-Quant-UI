@@ -268,11 +268,14 @@ def scan(
     on_progress: Callable[[int, int], None] | None = None,
     cancel: CancelCheck | None = None,
 ) -> ScanResult:
-    """逐张统计 + 找重复。**全部在宿主机上做。**
+    """逐张统计 + 找重复。**全部在宿主机上做，且不解码像素。**
 
-    为什么要解码像素（而不是像 `read_size` 那样只读文件头）：界面上的
-    「色彩模式」筛选需要真实的 `RGB` / `L`，而文件头给不出这个。
-    实测 3504 张全解码比容器侧整次扫描（~24 秒）仍然快一个数量级。
+    宽高来自 `read_size`（只读文件头），模式来自 `read_mode`（只读文件头）。
+    实测 3504 张：全解码 15.5 秒 → 文件头解析 **0.6 秒**（32x），
+    而且模式、宽高与容器侧 PIL **逐张零不一致**。
+
+    认不出的格式（bmp/tiff/webp/ppm…）**退回解码**，只为拿模式 ——
+    那些在真实数据集里是少数（实测那份 3504 张全是 JPEG）。
     """
     entries = [
         (p, p.stat().st_size)
@@ -297,12 +300,17 @@ def scan(
         if cancel is not None and cancel():
             break
 
-        image = QImage(str(path))
-        width = image.width() if not image.isNull() else None
-        height = image.height() if not image.isNull() else None
-        mode = _mode_of(image) if not image.isNull() else None
-        if image.isNull():
+        measured = read_size(path)
+        mode = read_mode(path)
+        if measured is None:
             result.unreadable.append(path.name)
+            width = height = None
+        else:
+            width, height = measured
+            if mode is None:
+                # 认不出的格式才解码，而且**只为拿模式**
+                image = QImage(str(path))
+                mode = _mode_of(image) if not image.isNull() else None
 
         result.stats.append(CalibStat(
             name=path.name, size=size,
