@@ -188,27 +188,18 @@ class CalibPage(StagePage):
 
         # 漏斗计数：一眼看清每一级剩多少
         #
-        # 采样张数放在**筛选条件下面、预览上面** —— 它是"漏斗"的一环：
-        # 筛选 → 采样 → 预览 → 勾选。原来它在下面的「校准参数」卡片里，
-        # 于是用户筛完看到预览只有 50 张，不知道是谁砍的（实测反馈）。
+        # ⚠️ **这里没有「预览张数」控件。** 曾经有一个（默认 50，均匀采样），
+        # 它存在的理由是"批量生成缩略图太贵"（3504 张要 26.5 秒 + 35 MB）。
+        # 缩略图改成**按需解码**之后那个理由没有了，控件却留着 ——
+        # 于是它从性能妥协变成了**第二层看不见的筛选**：用户设完筛选条件，
+        # 工具还替他决定"1172 张里你看哪 50 张"。
         #
-        # 上限就是网格能显示的张数：超过它就没法逐个勾选，是个隐藏的坑。
-        self.count_box = QSpinBox()
-        # 上限跟着数据量走：装条目现在是免费的，没有硬上限了
-        self.count_box.setRange(0, 100000)
-        self.count_box.setValue(50)
-        self.count_box.setSpecialValueText("全部")
-        self.count_box.setSuffix(" 张")
-        self.count_box.setToolTip(
-            "从筛完的结果里**均匀**取多少张来预览和挑选"
-            f"（0 = 全部用上，上限不设 —— 缩略图随滚动生成）。\n"
-            "均匀取样而不是随机：结果可复现，而且数据集通常按时间/场景排序，\n"
-            "间隔取样天然覆盖各个片段。"
-        )
-        self.count_box.valueChanged.connect(self._on_param_changed)
-        thumbs_card.add(
-            self._labelled("预览张数（从筛完的结果里均匀取）", self.count_box)
-        )
+        # 而且均匀采样对"挑选"这件事本身是错的：数据集按时间/场景排序，
+        # 采样会把它打散 —— 某个场景有 20 张几乎一样的、你想要 2 张，
+        # 采样可能给你 0 张，还看不到旁边的。连续浏览才能做这种判断。
+        #
+        # 现在**筛选结果全量进网格**。嫌多就把筛选条件收紧 ——
+        # 漏斗那行会告诉你「筛选后 N 张」。
 
         self.funnel_label = self._hint_label("尚未扫描。")
         thumbs_card.add(self.funnel_label)
@@ -253,8 +244,6 @@ class CalibPage(StagePage):
             self.dtype_box.addItem(label, value)
         self.dtype_box.currentIndexChanged.connect(self._on_param_changed)
         params.add(self._labelled("数据类型 cal_data_type", self.dtype_box))
-
-        # 「预览张数」在预览卡片里（漏斗的一环），不在这里 —— 见上面的说明。
 
         self.preprocess_box = QCheckBox(
             "preprocess_on —— 让工具自己 resize（官方建议保持关闭）"
@@ -365,14 +354,14 @@ class CalibPage(StagePage):
         return {Path(n).stem for n in names}
 
     def _display_names(self) -> list[str]:
-        """筛选 + 采样之后，应当出现在网格里的名字。
+        """筛选之后应当出现在网格里的名字。
 
-        **不再截断到 `MAX_TILES`。** 那个上限存在的唯一理由是"批量生成缩略图
-        太贵"，而现在装条目是免费的、解码是按需的（见 widgets/thumbnailgrid.py）。
+        **全量，不截断、不采样。** `count=0` 就是"全都要"。
+        上限（`MAX_TILES`）和采样张数（`count_box`）都已经删掉 ——
+        前者因为装条目免费了，后者因为它变成了第二层看不见的筛选。
         """
         _result, names = filter_and_sample(
-            self._stats, self.filter_spec(),
-            count=self.count_box.value(), duplicates=self._duplicates,
+            self._stats, self.filter_spec(), count=0, duplicates=self._duplicates,
         )
         return names
 
@@ -392,8 +381,7 @@ class CalibPage(StagePage):
             self.funnel_label.setText("尚未扫描。")
             return
         result, names = filter_and_sample(
-            self._stats, self.filter_spec(),
-            count=self.count_box.value(), duplicates=self._duplicates,
+            self._stats, self.filter_spec(), count=0, duplicates=self._duplicates,
         )
         total = len(self._stats)
         kept = len(result.kept)
@@ -404,14 +392,8 @@ class CalibPage(StagePage):
             why = result.explain()
             if why:
                 parts.append(f"（筛掉：{why}）")
-        # 预览数比筛选结果少时**要说清是谁砍的**，否则用户会以为筛错了。
-        # 两种原因：用户在「采样张数」里限了张数，或者网格本身放不下。
-        shown = len(names)
-        if kept > shown:
-            reason = "网格上限" if self.count_box.value() == 0 else "由「采样张数」决定"
-            parts.append(f"预览 {shown}（{reason}）")
-        else:
-            parts.append(f"预览 {shown}")
+        # **没有「预览 N」这一级了**：筛选结果全量进网格，它和「筛选后 N」
+        # 永远是同一个数。原来是两级（筛选 → 采样），现在只有一级。
         if self._displayed:
             parts.append(f"已选 {checked}")
         self.funnel_label.setText(" → ".join(parts))
@@ -841,8 +823,11 @@ class CalibPage(StagePage):
             layout="NCHW",
             color="bgr",
             dtype=self.dtype_box.currentData(),
-            count=self.count_box.value(),
-            # **明确指定勾选的那些**：user 的意图优先于自动采样
+            # `only=checked` 已经**明确指定**了要哪些，所以 count 给 0（全都要）。
+            # 这里原来是 `count=self.count_box.value()` —— 控件删掉后那行会
+            # AttributeError，而且它本来就被 `only` 盖过。
+            count=0,
+            # **明确指定勾选的那些**：用户的选择优先于任何自动采样
             only=checked,
         )
         out = self.workspace / spec.output_dir_name

@@ -489,13 +489,16 @@ def test_grid_names_and_displayed_names_are_compared_by_stem(shell, tmp_path: Pa
 
 
 def test_display_names_is_not_capped(shell):
-    """预览**不再**截断到 `MAX_TILES`。
+    """预览**不再**截断、也不再采样 —— 筛选结果全量进网格。
 
-    那个上限存在的唯一理由是"批量生成缩略图太贵"。现在缩略图是按需解码的
-    （见 `widgets/thumbnailgrid.py`），装条目免费，所以上限没有存在理由了。
+    两道限制都删掉了：
 
-    （本条原为 `test_display_names_is_capped_at_the_grid_limit`。
-    行为有意改变，理由记在提交信息里。）
+    * `MAX_TILES = 200`：理由是"批量生成缩略图太贵"，改成按需解码后不成立
+    * 「预览张数」（默认 50 的均匀采样）：同上。而且它变成了**第二层看不见的
+      筛选** —— 用户设完筛选条件，工具还替他决定"1172 张里你看哪 50 张"
+
+    （本条原为 `test_display_names_is_capped_at_the_grid_limit`。行为有意改变，
+    理由记在提交信息里。）
     """
     from rdkquant.core.calibfilter import CalibStat
 
@@ -504,11 +507,35 @@ def test_display_names_is_not_capped(shell):
         CalibStat(name=f"{i:05d}.jpg", size=1000, width=640, height=640)
         for i in range(600)
     ]
-    page.count_box.setValue(0)                     # 0 = 全部用上
 
     names = page._display_names()
-    assert len(names) == 600, "不再截断"
+    assert len(names) == 600, "筛选结果要全量返回，不截断也不采样"
     assert names[0] == "00000.jpg" and names[-1] == "00599.jpg"
+
+
+def test_funnel_survives_having_displayed_names(shell):
+    """漏斗刷新时如果网格里已经有内容，不能炸。
+
+    **这条是截图工具抓到的**：删「预览张数」时顺手把一个局部变量改名了，
+    而下面还在用它 —— `NameError`。477 个测试全过，因为它们都没有走
+    「`_displayed` 非空 + 刷新漏斗」这条路径；`tools/shots.py` 走了，于是崩了。
+    """
+    from rdkquant.core.calibfilter import CalibStat
+
+    page = shell.stage_pages[2]
+    page._stats = [
+        CalibStat(name=f"{i:04d}.jpg", size=1000, width=640, height=640)
+        for i in range(5)
+    ]
+    page._displayed = ["0000.jpg", "0001.jpg"]
+
+    page._refresh_funnel()
+    assert page.funnel_label.text(), "漏斗应当有文案"
+
+    # 条件改了但没刷新 → 要出提示，而不是抛异常
+    page._displayed = ["9999.jpg"]
+    page._refresh_funnel()
+    assert "请点「应用筛选并刷新预览」" in page.funnel_label.text()
 
 
 def test_scan_status_line_does_not_claim_no_image_library(shell, tmp_path: Path):
