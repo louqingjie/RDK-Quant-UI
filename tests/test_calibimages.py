@@ -187,6 +187,127 @@ def test_cancel_stops_early(qapp, tmp_path: Path):
 
 
 # --------------------------------------------------------------------------
+# 文件头解析（色彩模式）
+#
+# 为什么要它：全解码 3504 张要 ~15 秒，而模式就藏在文件头前几十个字节里。
+# 实测（用户那份 3504 张的数据集）：
+#     容器版（PIL）18.0 秒  →  文件头解析 0.6 秒   = 32x
+#     模式、宽高**零不一致**
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("fmt,expected", [
+    (QImage.Format.Format_RGB32, "RGB"),
+    (QImage.Format.Format_Grayscale8, "L"),
+    (QImage.Format.Format_ARGB32, "RGBA"),
+])
+def test_read_mode_matches_pil_names_for_png(qapp, tmp_path: Path, fmt, expected):
+    path = tmp_path / "x.png"
+    image = QImage(20, 20, fmt)
+    image.fill(QColor("white"))
+    assert image.save(str(path), "PNG")
+    assert calibimages.read_mode(path) == expected
+
+
+def test_png_mode_reads_color_type(qapp):
+    """PNG 的 color type 直接决定模式。
+
+    走 synth 而不是让 Qt 编码：**Qt 会自己挑怎么写** —— 实测把
+    `Format_Indexed8` 存成了灰度 PNG（color type 0），于是拿它测"索引色 → P"
+    会假失败（我第一版就是这么写错的）。
+    """
+    def png_with(color_type: int) -> bytes:
+        ihdr = (
+            b"\x00\x00\x00\x0d" + b"IHDR"
+            + b"\x00\x00\x00\x10" + b"\x00\x00\x00\x10"   # 16×16
+            + bytes([8, color_type, 0, 0, 0])
+        )
+        return b"\x89PNG\r\n\x1a\n" + ihdr
+
+    assert calibimages._png_mode(png_with(0)) == "L"
+    assert calibimages._png_mode(png_with(2)) == "RGB"
+    assert calibimages._png_mode(png_with(3)) == "P"
+    assert calibimages._png_mode(png_with(4)) == "LA"
+    assert calibimages._png_mode(png_with(6)) == "RGBA"
+    assert calibimages._png_mode(png_with(7)) is None, "未知 color type 不该瞎猜"
+
+
+def test_qt_indexed_png_is_actually_gray(qapp, tmp_path: Path):
+    """把上面那个坑本身钉住：Qt 把 Indexed8 存成灰度 PNG。
+
+    写这条是因为**我当时就是被它绊了一下** —— 以为在测"索引色 → P"，
+    实际上 Qt 根本没写索引色。以后有人再想当然，这条会解释原因。
+    """
+    path = tmp_path / "idx.png"
+    image = QImage(20, 20, QImage.Format.Format_Indexed8)
+    image.fill(QColor("white"))
+    assert image.save(str(path), "PNG")
+
+    data = path.read_bytes()
+    color_type_at = 8 + 4 + 4 + 4 + 4 + 1
+    assert data[color_type_at] == 0, "Qt 把它写成了灰度（color type 0），不是索引色"
+    assert calibimages.read_mode(path) == "L"
+
+
+def test_read_mode_for_jpeg_is_rgb(qapp, tmp_path: Path):
+    """三通道 JPEG → PIL 报 `RGB`（底层是 YCbCr，但 PIL 的命名是 RGB）。"""
+    path = tmp_path / "x.jpg"
+    image = QImage(40, 30, QImage.Format.Format_RGB32)
+    image.fill(QColor(200, 120, 60))
+    assert image.save(str(path), "JPEG")
+    assert calibimages.read_mode(path) == "RGB"
+
+
+def test_read_mode_returns_none_for_unknown_format(qapp, tmp_path: Path):
+    """认不出的格式返回 None，**不要在这里悄悄解码** ——
+    那会让快路径在某张图上突然变慢，而且看不出来。调用方自己决定退不退。"""
+    path = tmp_path / "x.bmp"
+    image = QImage(10, 10, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    image.save(str(path), "BMP")
+    assert calibimages.read_mode(path) is None
+
+
+def test_read_mode_on_garbage(qapp, tmp_path: Path):
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"\xff\xd8not really a jpeg")
+    assert calibimages.read_mode(bad) is None
+    missing = tmp_path / "不存在.jpg"
+    assert calibimages.read_mode(missing) is None
+
+
+def test_jpeg_mode_reads_component_count(qapp, tmp_path: Path):
+    """分量数直接决定模式：1→`L`，3→`RGB`，4→`CMYK`。
+
+    这里构造一段最小的 SOF0 段来验证映射表本身，
+    免得只靠 Qt 写出来的文件覆盖不到灰度/CMYK。
+    """
+    def jpeg_with(components: int) -> bytes:
+        sof = bytes([0xFF, 0xC0, 0x00, 0x11, 0x08,
+                     0x00, 0x10, 0x00, 0x10, components])
+        return b"\xff\xd8" + sof + b"\x00" * 32
+
+    assert calibimages._jpeg_mode(jpeg_with(1)) == "L"
+    assert calibimages._jpeg_mode(jpeg_with(3)) == "RGB"
+    assert calibimages._jpeg_mode(jpeg_with(4)) == "CMYK"
+    assert calibimages._jpeg_mode(jpeg_with(2)) is None, "2 分量不是常见情况，不该瞎猜"
+
+
+def test_read_size_does_not_decode_pixels(qapp, tmp_path: Path):
+    """`read_size` 只读文件头 —— 这是它 3504 张只要 0.79 秒的原因。
+
+    用一个**只有文件头、像素数据被截断**的 PNG 验证：尺寸照样读得出来。
+    如果哪天有人把它改成 `QImage(path)`，这条会红。
+    """
+    path = tmp_path / "truncated.png"
+    image = QImage(640, 480, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    image.save(str(path), "PNG")
+    data = path.read_bytes()
+    path.write_bytes(data[:64])          # 只留签名 + IHDR
+
+    assert calibimages.read_size(path) == (640, 480), "读尺寸不该依赖像素数据"
+
+
+# --------------------------------------------------------------------------
 # 清理
 # --------------------------------------------------------------------------
 def test_clear_thumbnails_keeps_the_listed_ones(qapp, tmp_path: Path):

@@ -43,6 +43,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -50,12 +51,17 @@ from typing import Callable, Iterable, Sequence
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader
 
+from ..core.calibfilter import CalibStat
+
 #: 认得的图片后缀。与 `data/rdkquant_probe.py` 的 `IMAGE_EXTS` 保持一致 ——
 #: 两边必须认得同一批文件，否则"容器扫得到、宿主机看不到"会变成新的坑。
 IMAGE_SUFFIXES = (
     ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp",
     ".ppm", ".pgm", ".pbm", ".gif",
 )
+
+#: 认得的二进制校准数据后缀（探针里那份的对应物，必须一字不差）
+BINARY_SUFFIXES = (".bin", ".dat", ".raw", ".f32", ".u8")
 
 CancelCheck = Callable[[], bool]
 
@@ -147,6 +153,189 @@ def build_thumbnails(
         if on_progress is not None:
             on_progress(index, total)
     return result
+
+
+#: 内容指纹只读前 64 KB —— 和 `probe.py` 里那套**必须一致**，
+#: 否则同一个目录在两边算出的重复组会不一样。
+DIGEST_HEAD_BYTES = 65536
+
+
+def _mode_of(image: QImage) -> str:
+    """把 Qt 的像素格式映射成 PIL 那套名称（`RGB` / `L` / `RGBA`）。
+
+    界面上的「色彩模式」筛选按这些名字匹配，所以**必须和容器侧对得上**。
+    """
+    fmt = image.format()
+    if fmt in (
+        QImage.Format.Format_Grayscale8,
+        QImage.Format.Format_Grayscale16,
+        QImage.Format.Format_Alpha8,
+        QImage.Format.Format_Mono,
+        QImage.Format.Format_MonoLSB,
+        QImage.Format.Format_Indexed8,
+    ):
+        # Qt 把灰度 JPEG 读成 Grayscale8、调色板 PNG 读成 Indexed8，
+        # 而 PIL 分别叫 `L` 和 `P` —— 分开报，否则筛选会张冠李戴。
+        return "P" if fmt == QImage.Format.Format_Indexed8 else "L"
+    if image.hasAlphaChannel():
+        return "RGBA"
+    return "RGB"
+
+
+def _digest(path: Path, size: int) -> str | None:
+    """内容指纹：大小 + 前 64 KB 的 sha1。与探针里的算法**逐字一致**。"""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(DIGEST_HEAD_BYTES)
+    except OSError:
+        return None
+    return f"{hashlib.sha1(head).hexdigest()}:{size}"
+
+
+@dataclass
+class ScanResult:
+    """扫一遍校准目录的结果。字段名与探针回包对齐，方便对照。"""
+
+    stats: list[CalibStat] = field(default_factory=list)
+    #: 内容重复的配对 `[[保留的, 重复的], ...]`，形状与探针一致
+    duplicates: list[list[str]] = field(default_factory=list)
+    total: int = 0
+    image_like: int = 0
+    binary_like: int = 0
+    unreadable: list[str] = field(default_factory=list)
+
+
+def scan(
+    directory: Path,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancel: CancelCheck | None = None,
+) -> ScanResult:
+    """逐张统计 + 找重复。**全部在宿主机上做。**
+
+    为什么要解码像素（而不是像 `read_size` 那样只读文件头）：界面上的
+    「色彩模式」筛选需要真实的 `RGB` / `L`，而文件头给不出这个。
+    实测 3504 张全解码比容器侧整次扫描（~24 秒）仍然快一个数量级。
+    """
+    entries = [
+        (p, p.stat().st_size)
+        for p in sorted(directory.iterdir())
+        if p.is_file()
+    ] if directory.is_dir() else []
+    images = [(p, size) for p, size in entries if p.suffix.lower() in IMAGE_SUFFIXES]
+    binaries = [
+        (p, size) for p, size in entries
+        if p.suffix.lower() in BINARY_SUFFIXES or "." not in p.name
+    ]
+
+    result = ScanResult(
+        total=len(images) + len(binaries),
+        image_like=len(images),
+        binary_like=len(binaries),
+    )
+
+    digests: dict[str, str] = {}
+    total = len(images)
+    for index, (path, size) in enumerate(images, start=1):
+        if cancel is not None and cancel():
+            break
+
+        image = QImage(str(path))
+        width = image.width() if not image.isNull() else None
+        height = image.height() if not image.isNull() else None
+        mode = _mode_of(image) if not image.isNull() else None
+        if image.isNull():
+            result.unreadable.append(path.name)
+
+        result.stats.append(CalibStat(
+            name=path.name, size=size,
+            width=width, height=height, mode=mode,
+        ))
+
+        digest = _digest(path, size)
+        if digest:
+            if digest in digests:
+                result.duplicates.append([digests[digest], path.name])
+            else:
+                digests[digest] = path.name
+
+        if on_progress is not None:
+            on_progress(index, total)
+
+    return result
+
+
+#: JPEG 里带 SOF（帧头）的标记。这些段里有分量数 = 色彩模式。
+_JPEG_SOF_MARKERS = frozenset(
+    {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+     0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+)
+#: 没有长度字段、要单独跳过的标记
+_JPEG_STANDALONE = frozenset({0xD8, 0xD9, 0x01, *range(0xD0, 0xD8)})
+
+
+def _jpeg_mode(data: bytes) -> str | None:
+    """从 JPEG 的 SOF 段读分量数。
+
+    1 → 灰度（PIL 叫 `L`）；3 → YCbCr（PIL 报 `RGB`）；4 → `CMYK`。
+    """
+    index = 2                                     # 跳过 SOI (FFD8)
+    size = len(data)
+    while index + 1 < size:
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        if marker in _JPEG_STANDALONE:
+            index += 2
+            continue
+        if index + 4 > size:
+            return None
+        length = int.from_bytes(data[index + 2:index + 4], "big")
+        if length < 2:
+            return None
+        if marker in _JPEG_SOF_MARKERS:
+            # 段内布局：长度(2) 精度(1) 高(2) 宽(2) 分量数(1)
+            components_at = index + 4 + 5
+            if components_at >= size:
+                return None
+            components = data[components_at]
+            return {1: "L", 3: "RGB", 4: "CMYK"}.get(components)
+        index += 2 + length
+    return None
+
+
+def _png_mode(data: bytes) -> str | None:
+    """从 PNG 的 IHDR 读 color type。
+
+    0→`L`  2→`RGB`  3→`P`  4→`LA`  6→`RGBA`（与 PIL 的叫法对齐）
+    """
+    # 8 字节签名 + 4 长度 + 4 "IHDR" + 4 宽 + 4 高 + 1 位深 + 1 color type
+    color_type_at = 8 + 4 + 4 + 4 + 4 + 1
+    if len(data) <= color_type_at:
+        return None
+    return {0: "L", 2: "RGB", 3: "P", 4: "LA", 6: "RGBA"}.get(data[color_type_at])
+
+
+def read_mode(path: Path) -> str | None:
+    """**只读文件头**判断色彩模式（用 PIL 那套名称，要和容器侧对得上）。
+
+    为什么不直接解码：3504 张全解码约 14 秒，而模式就藏在文件头前几十个字节里。
+    实测用户那份数据集 3504 张**全是 JPEG**，所以 JPEG 一条路径就覆盖了全部。
+
+    认不出的格式返回 `None` —— 调用方可以退回解码，**不要在这里悄悄解码**：
+    那会让"快路径"在某张图上突然变慢，而且看不出来。
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return None
+    if head[:2] == b"\xff\xd8":
+        return _jpeg_mode(head)
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return _png_mode(head)
+    return None
 
 
 def clear_thumbnails(out_dir: Path, keep: Iterable[str] = ()) -> int:
