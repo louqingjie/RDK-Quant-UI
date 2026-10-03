@@ -18,6 +18,19 @@ from typing import Callable, Iterable, Sequence
 
 LineCallback = Callable[[str], None]
 
+#: Windows 上别给子进程**新建控制台窗口**。
+#:
+#: 程序是用 `pythonw` 启动的（见 `scripts/run-windows-native.cmd`），自身**没有控制台**。
+#: 这种情况下每 spawn 一个控制台子进程（docker / wsl / nvidia-smi），Windows 就给它
+#: 新建一个窗口 —— 实测体检一次跑 4 条命令，桌面上就连着闪 4 个黑框；
+#: `docker run` 那个窗口还会一直挂到量化跑完为止。
+#:
+#: 从终端（`python.exe`）启动时不会有这个问题：子进程继承终端的控制台。
+#: 所以这个现象**只在"双击 .cmd"这条路径上出现**，在开发者自己的终端里复现不了。
+#:
+#: 只在 Windows 上有这个常量；POSIX 下取 0（也就是不传）。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
 
 class Cancelled(Exception):
     """用户主动取消。"""
@@ -116,10 +129,14 @@ def run_capture(argv: Sequence[str], *, timeout: float = 20.0) -> ProcResult:
         proc = subprocess.run(
             list(argv),
             capture_output=True,
+            # stdin 也要断开：pythonw 下没有可继承的 stdin，
+            # 让子进程去读一个无效句柄是自找麻烦（这些命令本来就全是非交互的）。
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
         return ProcResult(proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip())
     except FileNotFoundError:
@@ -152,6 +169,7 @@ def stream_lines(
             errors="replace",
             bufsize=1,
             cwd=cwd,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         on_line(f"[错误] 未找到可执行文件: {argv[0]}")
