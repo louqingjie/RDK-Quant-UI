@@ -100,3 +100,80 @@ def test_no_hardcoded_windows_paths_in_core():
         if 'r"C:\\' in text or '"C:\\\\' in text or "'C:\\\\" in text:
             offenders.append(str(path.relative_to(REPO)))
     assert not offenders, f"core 里出现了硬编码的 Windows 盘符路径：{offenders}"
+
+
+# --------------------------------------------------------------------------
+# ④ UI 里不能有「已经被证伪」的说法
+# --------------------------------------------------------------------------
+#: 每条都要写清**为什么过时**，否则以后没人敢删。
+#:
+#: ⚠️ 这**不是主动发现机制** —— 它只能把已经修好的锁住，防止漂回去。
+#: 新发现一条「文案和代码相反」，就在这儿加一行。
+STALE_UI_CLAIMS = (
+    ("缩略图由容器生成", "缩略图早已改成宿主机按需解码（ui/calibimages.py）"),
+    ("容器里没有可用的图像库", "扫描搬到宿主机之后，这句会对每个用户显示"),
+)
+
+
+def _string_literals(path: Path):
+    """文件里的**字符串字面量**（含 docstring），`(行号, 内容)`。
+
+    **只取字符串，不取注释。** 这不是洁癖：记录一个 bug 的注释里会**引用**
+    那句话（`calib.py` 里就有一处写着「容器里没有可用的图像库」来解释它为什么
+    错），按整文件 grep 的话，**注释反而会把测试弄红**。
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.lineno, node.value
+
+
+def _ui_python_files():
+    for path in (REPO / "src" / "rdkquant" / "ui").rglob("*.py"):
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        yield path
+
+
+def test_ui_text_has_no_stale_claims():
+    """UI 里不能再出现**已经被证伪**的说法。
+
+    `docs/AGENTS.md` 把「文案和代码相反」列为最危险的一类：缺文档只是没人看，
+    **写反的文案会把人引向错误的修改**。本项目真实发生过两次，都是
+    **截图核对**发现的，不是测试：
+
+    * 校准页卡片副标题写着「缩略图由容器生成」—— 早已搬到宿主机
+    * `_evaluate()` 掉进兜底分支，对每个用户显示「容器里没有可用的图像库」
+
+    所以这条测试的定位要说清：它是**回归门禁**，不是发现新问题的机制。
+    """
+    offenders = []
+    for path in _ui_python_files():
+        for line, text in _string_literals(path):
+            for phrase, why in STALE_UI_CLAIMS:
+                if phrase in text:
+                    offenders.append(
+                        f"{path.relative_to(REPO)}:{line} 有 {phrase!r}（{why}）"
+                    )
+    assert not offenders, (
+        "UI 里还有过时的说法：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_stale_claim_scanner_actually_sees_strings():
+    """**自检：确认上面那条门禁不是空的。**
+
+    取不到字符串的话，`test_ui_text_has_no_stale_claims` 永远绿 ——
+    那就是"看起来有门禁其实没有"，比没有更糟。
+    """
+    literals = list(_string_literals(REPO / "src" / "rdkquant" / "ui"
+                                     / "pages" / "calib.py"))
+    assert len(literals) > 50, f"AST 只取到 {len(literals)} 个字符串，取法有问题"
+
+    texts = [value for _line, value in literals]
+    assert not any("容器里没有可用的图像库" in t for t in texts), (
+        "**注释里的说明不该被算进去** —— 那句话在 calib.py 里是用来解释这个 bug 的，"
+        "按整文件 grep 会把记录它的注释弄红"
+    )
