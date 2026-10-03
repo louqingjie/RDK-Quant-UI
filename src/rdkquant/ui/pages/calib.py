@@ -48,6 +48,7 @@ from ...core.calibfilter import (
 )
 from ...core.findings import LEVEL_ERROR, LEVEL_OK, Finding
 from ...core.workflow import RunContext
+from .. import calibimages
 from ..metrics import METRICS
 from ..widgets import Card, CollapsibleSection, MetricTile, Tone
 from ..widgets.thumbnailgrid import MAX_TILES, ThumbnailGrid
@@ -483,12 +484,10 @@ class CalibPage(StagePage):
     def _on_apply_filter(self) -> None:
         """用当前筛选 + 采样结果重新生成缩略图。
 
-        这是唯一需要跑容器的环节——筛选本身是纯本地的。
+        **缩略图在宿主机上生成**（`ui/calibimages.py`，用 Qt），不跑容器 ——
+        实测 120 张 0.71 秒 vs 容器 4.96 秒（7x）。它只是界面要用的东西，
+        不是量化工作。（真正需要容器的只有生成校准数据那一步。）
         """
-        backend = self.backend()
-        if backend is None:
-            self.log.append_line("[提示] " + self.environment_hint())
-            return
         if not self._stats:
             self.log.append_line("[筛选] 请先扫描。")
             return
@@ -502,21 +501,24 @@ class CalibPage(StagePage):
             return
 
         thumbs = self.workspace / THUMB_SUBDIR
-        self.log.append_line(f"[筛选] 用 {len(names)} 张重新生成预览…")
 
         def job(emit_line, _emit_progress, cancel):
-            return backend.thumbnails(
-                staged, thumbs, only=names, on_line=emit_line, cancel=cancel
+            result = calibimages.build_thumbnails(
+                staged, thumbs, names, cancel=cancel.is_set,
             )
+            if result.unreadable:
+                emit_line(
+                    f"[筛选] {len(result.unreadable)} 张读不出（格式不支持或文件损坏）："
+                    + "、".join(result.unreadable[:3])
+                )
+            return result
 
-        def done(payload):
-            if not payload.get("ok"):
-                self.log.append_line(f"[筛选] 预览生成失败：{payload.get('error')}")
-                return
+        def done(result):
             self._displayed = list(names)
             # 只显示这批名字对应的缩略图（thumbs 目录里可能还留着上一次的）
             wanted = {Path(n).stem + ".png" for n in names}
             self.grid.set_images(thumbs, names=sorted(wanted))
+            self.log.append_line(f"[筛选] 预览已刷新：{result.generated} 张")
             self._refresh_funnel()
             self.envChanged.emit()
 
@@ -617,14 +619,8 @@ class CalibPage(StagePage):
                 staged, shape=shape, dtype=dtype, want_stats=True,
                 on_line=emit_line, cancel=cancel,
             )
-            thumbs = self.workspace / THUMB_SUBDIR
-            try:
-                backend.thumbnails(
-                    staged, thumbs, count=self.count_box.value(),
-                    on_line=emit_line, cancel=cancel,
-                )
-            except Exception as exc:      # 缩略图失败不该毁掉整次扫描
-                emit_line(f"[校准] 缩略图生成失败：{exc}")
+            # 缩略图**不在这里做**：它改成宿主机 Qt 生成了（见 _on_scanned），
+            # 而且要先有逐张统计才知道该画哪几张。
             payload["_staged"] = str(staged)
             return payload
 
@@ -661,9 +657,25 @@ class CalibPage(StagePage):
         self._evaluate()
         names = self._display_names()
         if names:
-            wanted = sorted({Path(n).stem + ".png" for n in names})
-            self.grid.set_images(self.workspace / THUMB_SUBDIR, names=wanted)
-            self._displayed = list(names)
+            # 缩略图在这里生成：**宿主机 Qt**，不跑容器（实测 120 张 0.71 秒
+            # vs 容器 4.96 秒）。放在 `_on_scanned` 而不是扫描那个 job 里，
+            # 是因为要先有逐张统计才知道该画哪几张。
+            thumbs = self.workspace / THUMB_SUBDIR
+            staged = self._staged or (self.workspace / "cal_images")
+            try:
+                result = calibimages.build_thumbnails(staged, thumbs, names)
+                if result.unreadable:
+                    self.log.append_line(
+                        f"[校准] {len(result.unreadable)} 张读不出（格式不支持或文件损坏）"
+                    )
+                self.grid.set_images(
+                    thumbs, names=sorted({Path(n).stem + ".png" for n in names})
+                )
+                self._displayed = list(names)
+            except Exception as exc:      # 缩略图失败不该毁掉整次扫描
+                self.log.append_line(f"[校准] 缩略图生成失败：{exc}")
+                self.grid.clear()
+                self._displayed = []
         else:
             self.grid.clear()
             self._displayed = []
