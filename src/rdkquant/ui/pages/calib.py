@@ -80,7 +80,8 @@ class CalibPage(StagePage):
         #: **生成必须用它，不能用 self.directory** —— 那是用户选的原始路径，
         #: 可能在工作区外，容器根本看不到（实测踩过）。
         self._staged: Path | None = None
-        #: 逐张统计（容器扫描时写在工作区里，宿主读来做筛选）
+        #: 逐张统计的落地路径（**旧路径**，早已改由宿主机扫描直接产出，
+#: 见 `ui/calibimages.py:scan()`）。留常量是因为探针那边仍然会写。
         self._stats: list[CalibStat] = []
         #: 内容重复的配对，来自扫描回包，形状 [[保留的, 重复的], ...]
         self._duplicates: list = []
@@ -140,7 +141,7 @@ class CalibPage(StagePage):
         self.body.addWidget(overview)
 
         # ---- 筛选 + 缩略图 ----
-        thumbs_card = Card("筛选与挑选", "缩略图由容器生成")
+        thumbs_card = Card("筛选与挑选", "缩略图随滚动生成，不占等待时间")
 
         # 筛选条件收进可折叠区：条件多，但多数时候用户只用其中一两个
         self.filter_section = CollapsibleSection("筛选条件", expanded=False)
@@ -229,7 +230,7 @@ class CalibPage(StagePage):
         picks.addStretch(1)
         self.apply_btn = self._button(
             "应用筛选并刷新预览", self._on_apply_filter, primary=True,
-            tooltip="筛选在本地即时完成；这一步是用结果重新生成缩略图，需要跑一次容器。",
+            tooltip="筛选是纯本地计算；这一步只是按结果重装网格，不跑容器、不预生成缩略图。",
         )
         picks.addWidget(self.apply_btn)
         thumbs_card.add(pick_row)
@@ -549,6 +550,9 @@ class CalibPage(StagePage):
         self.log.append_line(
             f"[筛选] 预览已刷新：{len(names)} 张（缩略图随滚动生成）"
         )
+        # **把网格滚进视野。** 卡片栈到网格上面已经有 500 多像素，而网格固定
+        # 4 行高 —— 不滚的话用户点完「应用筛选」，结果在视野外，看着像没反应。
+        self.scroll.ensureWidgetVisible(self.grid, 0, 0)
         self._refresh_funnel()
         self.envChanged.emit()
 
@@ -728,6 +732,7 @@ class CalibPage(StagePage):
         if names:
             self.grid.set_images(staged, names=names)
             self._displayed = list(names)
+            self.scroll.ensureWidgetVisible(self.grid, 0, 0)
         else:
             self.grid.clear()
             self._displayed = []
@@ -779,13 +784,12 @@ class CalibPage(StagePage):
 
         if payload.get("ok") is False:
             self.backend_label.setText(f"扫描失败：{payload.get('error')}")
-        elif payload.get("imaging_backend"):
+        else:
+            # ⚠️ 这里原来读容器回包里的 `imaging_backend`。扫描搬到宿主机之后
+            # 那个字段没有了，于是会掉进最后那个分支，对**每个用户**显示
+            # 「容器里没有可用的图像库」—— 既错又吓人（截图核对时抓到的）。
             self.backend_label.setText(
-                f"容器里用 {payload['imaging_backend']} 读图。"
-            )
-        elif payload:
-            self.backend_label.setText(
-                "容器里没有可用的图像库，只做了文件计数与字节数校验。"
+                f"已在宿主机上逐个读取 {payload.get('count', 0)} 张的尺寸与色彩模式。"
             )
 
         self.set_findings(verdict.findings)

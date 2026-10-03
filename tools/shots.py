@@ -27,6 +27,79 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _seed_calib_images(workspace: Path) -> Path:
+    """给截图工作区造几张真图。
+
+    不造的话校准页永远是「尚未扫描」，网格一行都拍不到 —— **懒加载的改动
+    就没被截图矩阵覆盖**，评审看不出网格是好的还是坏的。
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QColor, QImage
+
+    target = workspace / "cal_images"
+    target.mkdir(parents=True, exist_ok=True)
+    if any(target.glob("*.jpg")):
+        return target
+    for index in range(12):
+        image = QImage(320, 240, QImage.Format.Format_RGB32)
+        image.fill(QColor.fromHsv(index * 28 % 360, 150, 200))
+        image.save(str(target / f"demo{index:02d}.jpg"), "JPEG")
+    return target
+
+
+def _populate_calib_grid(shell, workspace: Path) -> None:
+    """让校准页的网格真的有内容。
+
+    正常流程要走"选目录 → 扫描"，那需要容器。截图只关心**渲染**，
+    所以这里直接把扫描的结论注进去 —— 走的是和真实路径**同一个**
+    `grid.set_images()`，所以懒加载、按需解码全都是真的在跑。
+    """
+    from rdkquant.core.calibfilter import CalibStat
+
+    page = next(
+        (p for p in shell.stage_pages if type(p).__name__ == "CalibPage"), None
+    )
+    if page is None:
+        return
+    source = _seed_calib_images(workspace)
+    names = sorted(p.name for p in source.glob("*.jpg"))
+    if not names:
+        return
+    page._staged = source
+    page._stats = [
+        CalibStat(name=name, size=(source / name).stat().st_size,
+                  width=320, height=240, mode="RGB")
+        for name in names
+    ]
+    page.grid.set_images(source, names=names)
+    page._displayed = list(names)
+    page.filter_section.setEnabled(True)
+    page._refresh_funnel()
+    # 网格固定 4 行高，卡片栈到它上面已经有 500 多像素 —— 不滚的话截图里
+    # 根本拍不到网格（评审会以为坏了）。真实路径也做同一件事，见 `_on_apply_filter`。
+    page.scroll.ensureWidgetVisible(page.grid, 0, 0)
+
+
+def _settle(app, predicate, timeout_ms: int = 2000) -> bool:
+    """泵事件循环直到 `predicate()` 成立或超时。**有上限**，不会挂住截图。
+
+    缩略图是**按需、异步**解码的（见 `ui/widgets/thumbnailgrid.py`）：
+    光调几次 `processEvents()` 是不够的 —— 工作线程还没跑完，
+    截出来的网格就是一片空白。
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def _single(args: argparse.Namespace) -> int:
     sys.path.insert(0, str(ROOT / "src"))
 
@@ -80,6 +153,20 @@ def _single(args: argparse.Namespace) -> int:
             app.processEvents()
 
         key = shell.nav.item(row).data(0x0100)  # Qt.UserRole
+
+        # 校准页要有内容，否则拍的是"尚未扫描"，网格一行都看不见
+        if key == "calib":
+            _populate_calib_grid(shell, Path(args.workspace))
+            grid = getattr(
+                next((p for p in shell.stage_pages
+                      if type(p).__name__ == "CalibPage"), None), "grid", None
+            )
+            if grid is not None:
+                # 等首屏缩略图**真的解码回来**再截图
+                _settle(app, lambda g=grid: g.decoded_rows() > 0)
+            for _ in range(3):
+                app.processEvents()
+
         name = f"{base_style or 'default'}_{mode.value}_{scale_tag}_{row + 1:02d}_{key}.png"
         target = out_dir / name
         if shell.grab().save(str(target)):

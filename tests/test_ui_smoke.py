@@ -511,6 +511,34 @@ def test_display_names_is_not_capped(shell):
     assert names[0] == "00000.jpg" and names[-1] == "00599.jpg"
 
 
+def test_scan_status_line_does_not_claim_no_image_library(shell, tmp_path: Path):
+    """扫描状态行不能说「容器里没有可用的图像库」。
+
+    **这条是截图核对抓到的**，不是测试抓到的：扫描搬到宿主机之后，容器回包里
+    的 `imaging_backend` 字段就没有了，于是原来那段 `if/elif` 掉进最后分支 ——
+    对**每个用户**显示「容器里没有可用的图像库，只做了文件计数与字节数校验」。
+    而这跟界面上明明给出的尺寸、色彩模式自相矛盾。
+    """
+    from rdkquant.ui import calibimages
+
+    page = shell.stage_pages[2]
+    source = tmp_path / "cal2"
+    source.mkdir()
+    for index in range(2):
+        from PySide6.QtGui import QColor, QImage
+
+        image = QImage(40, 30, QImage.Format.Format_RGB32)
+        image.fill(QColor(100, 100, 100))
+        image.save(str(source / f"{index:04d}.jpg"), "JPEG")
+
+    page.payload = page._as_payload(calibimages.scan(source), source)
+    page._evaluate()
+
+    text = page.backend_label.text()
+    assert "没有可用的图像库" not in text, "扫描在宿主机上做，这句是错的"
+    assert "宿主机" in text
+
+
 def test_exclude_bad_exposure_reports_its_coverage(shell, tmp_path: Path):
     """「排除过曝/欠曝」必须**如实说明覆盖了多少张**。
 

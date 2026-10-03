@@ -36,15 +36,16 @@ RDK 模型量化工具：把地平线 RDK X5 / X3 的模型量化流程（官方
 
 ### 已知的 Qt 陷阱
 
-改 `src/rdkquant/ui/` 前先看 [`docs/qt-traps.md`](docs/qt-traps.md)。五条，都真实踩过：
+改 `src/rdkquant/ui/` 前先看 [`docs/qt-traps.md`](docs/qt-traps.md)。六条，都真实踩过：
 
 1. `processEvents()` 不处理 `DeferredDelete` → 控件从不销毁（曾让整个套件慢 14 倍）
 2. `QListView` 的 IconMode 只读模型的第 0 列 → 只显示每行第一个
 3. `make_table(headers)` 收的是表头列表，不是 model → 传错得到全 0 宽空表
 4. 信号连接会被**立即求值** → 构造期 `AttributeError`
 5. 构造期控件就发 `valueChanged` → 回调里碰还没创建的控件
+6. 跨线程：`Signal` 参数写 `dict` 发不出去（静默丢失）；`QPixmap`/`QIcon` 只能在 GUI 线程造
 
-**后三条出错时没有异常**，只是"看起来不对"。所以改完 UI 要**看渲染结果**，不能只看"没报错"。
+**第 3~6 条出错时没有异常**，只是"看起来不对"。所以改完 UI 要**看渲染结果**，不能只看"没报错"。
 
 ### 文件操作
 

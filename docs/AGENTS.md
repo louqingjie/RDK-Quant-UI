@@ -17,7 +17,7 @@
 | [README.md](../README.md) | 使用者：装、启、界面、排错 | 架构理由，实测的容器细节 |
 | [AGENTS.md](../AGENTS.md) | 改代码的 agent：常驻指令。每条 1~3 行，细节链到它的家 | 故事，走查，只在特定场景才需要的模板 |
 | [commit-format.md](commit-format.md) | 提交信息的模板和两个必须记住的开关 | 工作流约束本身（在根 `AGENTS.md`） |
-| [qt-traps.md](qt-traps.md) | 五个 Qt 陷阱的机制、症状和修法 | 非 Qt 的坑 |
+| [qt-traps.md](qt-traps.md) | 六个 Qt 陷阱的机制、症状和修法 | 非 Qt 的坑 |
 | [CONTAINER_FINDINGS.md](../tests/fixtures/CONTAINER_FINDINGS.md) | **实测**出的容器行为：格式、默认值、报错原文 | 没实测过的推测 |
 | 代码注释 | 局部契约：行为、失败、时序、所有权、例外 | 推理过程，测试走查，代码复述 |
 

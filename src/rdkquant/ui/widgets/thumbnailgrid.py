@@ -246,8 +246,10 @@ class ThumbnailGrid(QListView):
         self.setWordWrap(True)
         self.setSpacing(METRICS.space_1)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
-        # **固定高度，自己滚** —— 页面高度与条目数无关（见模块注释）
-        self.setFixedHeight(GRID_ROWS * self.gridSize().height() + 12)
+        # ⚠️ `_sync_height()` **不能在这里调** —— 它要读 `self._model.rowCount()`，
+        # 而 `self._model` 几行之后才创建。提前调就是构造期 AttributeError，
+        # 也就是 `docs/qt-traps.md` 里第 4、5 条那一类"看起来没报错其实没生效"
+        # 的坑的近亲：这次倒是报了错，但报了 56 个。放到 `__init__` 末尾。
 
         self._model = ThumbnailModel(self)
         self._model.on_icon_needed = self._request_icon
@@ -275,6 +277,34 @@ class ThumbnailGrid(QListView):
         # 自己的线程池：不跟别处抢，而且随网格一起销毁（析构会等任务收尾）
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
+
+        # 到这儿 `self._model` 才存在（见上面那段说明）。
+        # **自己滚，但高度跟着内容走**：条目少就矮一点，多了才长到 GRID_ROWS
+        # 行然后内部滚动。固定 4 行的话，只有 12 张时会白空两行。
+        self._sync_height()
+
+    # ------------------------------------------------------------------
+    def _sync_height(self) -> None:
+        """高度 = `min(需要几行, GRID_ROWS)`。
+
+        和早先那版的区别是**加了上限**：早先按内容无限长，3504 张会让外层
+        滚动区变成四万多像素，把筛选控件顶到看不见的地方。现在超过 4 行就
+        自己滚。
+
+        下限也是需要的：只有 12 张却占 4 行高，就是白空一片。
+        只在宽度变化时重算，所以不会和 `resizeEvent` 形成死循环。
+        """
+        grid = self.gridSize()
+        per_row = max(1, self.viewport().width() // max(1, grid.width()))
+        count = self._model.rowCount()
+        rows = min(GRID_ROWS, max(1, -(-count // per_row)))   # 向上取整
+        wanted = rows * grid.height() + 12
+        if self.height() != wanted:
+            self.setFixedHeight(wanted)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_height()
 
     # ------------------------------------------------------------------
     # 勾选状态
@@ -332,6 +362,7 @@ class ThumbnailGrid(QListView):
             self._failed.clear()
             self._exposure.clear()
             self._model.reset([], [])
+        self._sync_height()
 
     def set_images(self, directory: Path, names: list[str] | None = None) -> int:
         """把目录（或指定文件名）下的图片装进网格，**默认全部勾选**。
@@ -361,6 +392,7 @@ class ThumbnailGrid(QListView):
             self._model.reset(
                 [p.name for p in candidates], [p for p in candidates]
             )
+        self._sync_height()
         self.verticalScrollBar().setValue(0)
         return self._model.rowCount()
 
@@ -452,9 +484,9 @@ class ThumbnailGrid(QListView):
 
     @contextmanager
     def _bulk(self):
-        """批量改动时压住 `itemChanged`，只在最后发一次信号。
+        """批量改动时压住 `checkedChanged`，只在最后发一次信号。
 
-        不做这个的话，"全选 200 张"会触发 200 次信号，界面会重算 200 次计数。
+        不做这个的话，"全选 3000 张"会触发 3000 次信号，界面会重算 3000 次计数。
         """
         self._suppress = True
         counter: dict = {}

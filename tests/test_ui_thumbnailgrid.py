@@ -306,6 +306,54 @@ def test_set_images_does_not_truncate(qapp, tmp_path):
     assert widget.decoded_rows() == 0, "装 1500 个条目不该解码任何一张"
 
 
+def test_height_shrinks_for_a_small_set(qapp, tmp_path: Path):
+    """条目少的时候网格要矮一点，别白空几行。
+
+    高度 = `min(需要几行, GRID_ROWS)`：少了就缩，多了才长到上限然后自己滚。
+    """
+    import math
+
+    from rdkquant.ui.widgets.thumbnailgrid import GRID_ROWS
+
+    directory = tmp_path / "few"
+    directory.mkdir()
+    for index in range(4):
+        (directory / f"{index:04d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    widget = ThumbnailGrid()
+    widget.resize(600, 400)
+    widget.set_images(directory)
+    qapp.processEvents()
+
+    per_row = max(1, widget.viewport().width() // widget.gridSize().width())
+    rows = min(GRID_ROWS, max(1, math.ceil(4 / per_row)))
+    assert widget.height() == rows * widget.gridSize().height() + 12
+
+
+def test_height_is_capped_for_a_huge_set(qapp, tmp_path: Path):
+    """条目再多也不超过 GRID_ROWS 行 —— 页面高度必须与条目数**无关**。
+
+    不设上限的话，3504 张会让外层滚动区变成四万多像素，
+    把筛选控件顶到看不见的地方。
+    """
+    from rdkquant.ui.widgets.thumbnailgrid import GRID_ROWS
+
+    directory = tmp_path / "huge"
+    directory.mkdir()
+    for index in range(3000):
+        (directory / f"{index:05d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    widget = ThumbnailGrid()
+    widget.resize(600, 400)
+    widget.show()                      # 滚动范围要显示出来才算得出来
+    widget.set_images(directory)
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert widget.height() <= GRID_ROWS * widget.gridSize().height() + 12
+    assert widget.verticalScrollBar().maximum() > 0, "超出的部分要能自己滚"
+
+
 def test_set_images_on_missing_directory_is_empty(grid, tmp_path):
     assert grid.set_images(tmp_path / "不存在") == 0
     assert grid.checked_names() == []

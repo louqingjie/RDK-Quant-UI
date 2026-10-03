@@ -79,6 +79,8 @@ class StagePage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        #: 存下来给 `ensureWidgetVisible` 用 —— 刷新完预览要能把网格滚进视野
+        self.scroll = scroll
         holder = QWidget()
         self.body = QVBoxLayout(holder)
         self.body.setContentsMargins(
