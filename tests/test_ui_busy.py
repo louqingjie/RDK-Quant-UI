@@ -115,3 +115,79 @@ def test_timer_actually_ticks(qapp, panel):
         time.sleep(0.05)
     assert "秒" in panel.progress.format()
     assert "已用" in panel.progress.format()
+
+
+# --------------------------------------------------------------------------
+# 全局单飞
+# --------------------------------------------------------------------------
+@pytest.fixture()
+def jobs(qapp):
+    from rdkquant.ui.workers import JobCoordinator
+
+    return JobCoordinator()
+
+
+def test_idle_coordinator_is_free(jobs):
+    assert not jobs.busy
+    assert jobs.label == ""
+
+
+def test_first_claim_wins(jobs):
+    a, b = object(), object()
+    assert jobs.claim(a, "模型检查") is True
+    assert jobs.busy
+    assert jobs.label == "模型检查"
+    assert jobs.is_owner(a)
+
+    # 第二个人拿不到
+    assert jobs.claim(b, "校准数据生成") is False
+    assert jobs.is_owner(a), "被拒绝的占用不该影响原来的持有者"
+    assert jobs.label == "模型检查"
+
+
+def test_release_only_by_the_owner(jobs):
+    """**只有持有者能释放。**
+
+    否则一个迟到结束的任务会把别人正在跑的占用清掉，单飞就形同虚设。
+    """
+    a, b = object(), object()
+    jobs.claim(a, "甲")
+    jobs.release(b)                      # 乙不是持有者
+    assert jobs.busy and jobs.is_owner(a), "别人不该能释放我的占用"
+
+    jobs.release(a)
+    assert not jobs.busy
+    assert not jobs.is_owner(a)
+
+
+def test_release_then_claim_again(jobs):
+    a, b = object(), object()
+    jobs.claim(a, "甲")
+    jobs.release(a)
+    assert jobs.claim(b, "乙") is True
+
+
+def test_blocked_message_names_the_running_job(jobs):
+    """**必须说清是谁在跑** —— 只说"忙"，用户不知道该等什么。"""
+    jobs.claim(object(), "模型检查")
+    message = jobs.blocked_message()
+    assert "模型检查" in message
+    assert "取消" in message, "要告诉用户还能取消"
+
+
+def test_changed_signal_fires_on_claim_and_release(jobs):
+    seen = []
+    jobs.changed.connect(lambda: seen.append(jobs.busy))
+    owner = object()
+    jobs.claim(owner, "甲")
+    jobs.release(owner)
+    assert seen == [True, False]
+
+
+def test_releasing_a_non_owner_does_not_emit(jobs):
+    """拒绝别人的释放时不该发信号 —— 否则界面会白刷一轮。"""
+    seen = []
+    jobs.claim(object(), "甲")
+    jobs.changed.connect(lambda: seen.append(1))
+    jobs.release(object())
+    assert seen == []

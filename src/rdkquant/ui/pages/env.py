@@ -51,7 +51,7 @@ from ..widgets import (
     fit_columns_to_content,
     make_table,
 )
-from ..workers import TaskRunner
+from ..workers import JobCoordinator, TaskRunner
 
 _LEVEL_TEXT = {LEVEL_OK: "通过", LEVEL_WARN: "警告", LEVEL_ERROR: "错误"}
 
@@ -88,6 +88,7 @@ class EnvPage(QWidget):
         *,
         log_panel: LogPanel,
         with_remote: bool = False,
+        jobs=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -95,6 +96,10 @@ class EnvPage(QWidget):
         self.log_panel = log_panel
         self.cache_dir = img.default_cache_dir()
         self.tasks = TaskRunner(self)
+        #: 全应用单飞协调器（见 ui/workers.py: JobCoordinator）。
+        #: 没传就自建一个私有的 —— 独立构造本页时退化成"只看这一页"。
+        self.jobs = jobs if jobs is not None else JobCoordinator(self)
+        # 信号**等界面建完再连** —— `_on_jobs_changed` 要碰 fetch_btn 这些控件。
         self.specs = img.load_manifest()
         self.local: list[str] = []
         self.report: HostReport | None = None
@@ -136,6 +141,31 @@ class EnvPage(QWidget):
             # 截图模式：**同步**探测，这样截出来的图上就是真实体积
             self._probe_remote_sync()
         # 正常启动时由 refresh_report() 触发**异步**自动探测（见 _auto_probe_remote）
+        self.jobs.changed.connect(self._on_jobs_changed)
+
+    def _on_jobs_changed(self) -> None:
+        """全局单飞：有人（可能是我自己）在跑 → 动作按钮禁用。
+
+        「取消」按钮的处理要分情况，因为它连的是**本页的** runner
+        （`self.tasks.cancel_all`）：
+
+        * 我在跑 → 取消可用，它取消的确实是我的任务
+        * 别页在跑 → 取消也禁用。它点了不会有任何作用，
+          **留着反而让人以为能取消别人的任务**
+        """
+        if self.jobs.is_owner(self):
+            self.fetch_btn.setEnabled(False)
+            self.remote_btn.setEnabled(False)
+            self.cancel_btn.setEnabled(True)
+            return
+        if self.jobs.busy:
+            self.fetch_btn.setEnabled(False)
+            self.remote_btn.setEnabled(False)
+            self.cancel_btn.setEnabled(False)
+            return
+        self.fetch_btn.setEnabled(True)
+        self.remote_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
 
     # ------------------------------------------------------------------
     # 日志与进度由外壳的共享面板提供，页面内不再各带一份
@@ -629,6 +659,11 @@ class EnvPage(QWidget):
         if self.tasks.busy:
             self.log.append_line("[提示] 已有任务在跑，请先等待或取消。")
             return
+        # 全局单飞：下载 + `docker load` 动辄几十分钟，不能和别的页面的
+        # `docker run` 同时跑（进度条是全局共享的，两边会互相覆盖）
+        if not self.jobs.claim(self, f"获取镜像 {spec.display_name}"):
+            self.log.append_line(f"[提示] {self.jobs.blocked_message()}")
+            return
 
         self.fetch_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
@@ -668,8 +703,7 @@ class EnvPage(QWidget):
         )
 
     def _on_fetch_done(self, result) -> None:
-        self.fetch_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
+        self.jobs.release(self)          # 触发 changed → 按钮状态统一由它管
         self.progress.setValue(100)
         self.progress.setFormat(f"完成：{result.action}")
         self.log.append_line(f"[完成] {result.action} → {result.image_ref}")
@@ -677,8 +711,7 @@ class EnvPage(QWidget):
         self.refresh_report()
 
     def _on_fetch_failed(self, message: str) -> None:
-        self.fetch_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
+        self.jobs.release(self)
         self.progress.setValue(0)
         self.progress.setFormat("失败")
         self.log.append_line(f"[失败] {message}")

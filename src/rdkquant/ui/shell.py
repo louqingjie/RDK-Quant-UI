@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from ..core.workflow import STAGES, RunContext, Stage, evaluate, next_stage
 from . import icons
 from .metrics import METRICS, font_with_delta
+from .workers import JobCoordinator
 from .pages import (
     CalibPage,
     CheckPage,
@@ -111,6 +112,9 @@ class AppShell(QMainWindow):
 
         self._build_log_dock()
         self._build_statusbar()
+        #: 全应用单飞：同一时刻只允许一个后台任务。
+        #: 各页面的 TaskRunner 仍然各管各的线程，**占用策略**统一走这里。
+        self.jobs = JobCoordinator(self)
         self._register_pages(with_remote=with_remote)
         self._apply_theme_icon()
 
@@ -227,7 +231,8 @@ class AppShell(QMainWindow):
         self.pages: dict[str, QWidget] = {}
 
         self.env_page = EnvPage(
-            self.workspace, log_panel=self.log_panel, with_remote=with_remote
+            self.workspace, log_panel=self.log_panel,
+            with_remote=with_remote, jobs=self.jobs,
         )
         self.env_page.envChanged.connect(self.refresh_workflow)
 
@@ -255,6 +260,7 @@ class AppShell(QMainWindow):
                         backend_provider=self.current_backend,
                         log_panel=self.log_panel,
                         context_provider=lambda: self.context,
+                        jobs=self.jobs,
                     )
                     page.envChanged.connect(self.refresh_workflow)
                     self.stage_pages.append(page)

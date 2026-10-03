@@ -394,6 +394,44 @@ def test_finished_task_restores_the_idle_state(shell, qapp, monkeypatch):
     assert [b.isEnabled() for b in page._action_buttons] == idle
 
 
+def test_cross_page_single_flight(shell, qapp, monkeypatch):
+    """**跨页单飞**：一个页面在跑时，别的页面不许再起任务。
+
+    起因：`TaskRunner` 是**每页一个**，页面之间没有任何协调 —— 可以一边在
+    S2 跑模型检查、一边切到 S3 跑校准数据生成，两个 `docker run` 并行。
+    而日志面板和进度条是**全局共享**的（`StagePage.progress` 就是
+    `log_panel.progress`），两路输出交织成一团、进度条互相覆盖。
+    """
+    _ready_env(shell, monkeypatch)
+    first, second = shell.stage_pages[0], shell.stage_pages[1]
+    panel = shell.log_panel
+
+    second.refresh_buttons()
+    idle = [b.isEnabled() for b in second._action_buttons]
+    assert any(idle), "环境就绪时至少该有个按钮可用，否则测不出禁用"
+
+    assert first.start(_slow_job(), lambda _r: None, label="模型检查") is True
+    qapp.processEvents()
+
+    # 另一个页面起不来，而且**要说清是谁在跑**（静默失败会让按钮看起来坏了）
+    assert second.start(_slow_job(), lambda _r: None, label="校准数据生成") is False
+    text = panel.log.text_all()
+    assert "已有任务在跑" in text
+    assert "模型检查" in text
+    assert all(not b.isEnabled() for b in second._action_buttons), \
+        "别页在跑时，本页按钮也该禁用"
+
+    # 等第一个跑完 → 第二个就能用了
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and panel.busy:
+        qapp.processEvents()
+        time.sleep(0.02)
+    qapp.processEvents()
+
+    assert [b.isEnabled() for b in second._action_buttons] == idle, "占用释放后按钮该恢复"
+    assert second.start(_slow_job(0.1), lambda _r: None, label="校准数据生成") is True
+
+
 def test_log_view_appends_and_roundtrips(qapp):
     from rdkquant.ui.widgets import LogView
 

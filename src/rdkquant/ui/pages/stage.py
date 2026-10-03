@@ -29,7 +29,7 @@ from ...core.workflow import RunContext, StageSpec
 from ..metrics import METRICS
 from ..palette import semantic_colors
 from ..widgets import Card, LogPanel, TableModel, fit_columns_to_content, make_table
-from ..workers import TaskRunner
+from ..workers import JobCoordinator, TaskRunner
 from .env import fit_table_height
 
 _LEVEL_TEXT = {LEVEL_OK: "通过", LEVEL_WARN: "警告", LEVEL_ERROR: "错误"}
@@ -49,6 +49,7 @@ class StagePage(QWidget):
         backend_provider,
         log_panel: LogPanel,
         context_provider=None,
+        jobs: JobCoordinator | None = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -60,10 +61,16 @@ class StagePage(QWidget):
         #: （例如校准页需要 S1 推导出的 input_shape）。
         self.context_provider = context_provider or (lambda: None)
         self.tasks = TaskRunner(self)
+        #: 全应用单飞协调器。没传就自建一个私有的 —— 独立构造页面
+        #: （测试、单页工具）时行为退化成"只看这一页"。
+        self.jobs = jobs if jobs is not None else JobCoordinator(self)
         self._findings: list[Finding] = []
         #: 本页所有的动作按钮（`_button()` 建的）。任务跑起来时统一禁用，
         #: 免得用户点了没反应又不知道为什么。
         self._action_buttons: list[QPushButton] = []
+        #: 当前任务的完成回调。存成属性而不是闭包 —— 见 `start()` 里的说明。
+        self._pending_done = None
+        self._pending_label = ""
 
         # 主体放在滚动区里：本项目的页面都比较长，而且大字号下 Qt 不会裁剪子控件，
         # 不滚动就会互相重叠（这个坑在环境页踩过）。
@@ -84,6 +91,9 @@ class StagePage(QWidget):
 
         self.build()
         self.body.addStretch(1)
+        # **必须在 build() 之后连**：`_on_jobs_changed` 会调 `refresh_buttons()`，
+        # 而那是子类实现的、要碰 build() 里创建的控件。提前连上就会 AttributeError。
+        self.jobs.changed.connect(self._on_jobs_changed)
 
     # ------------------------------------------------------------------
     # 子类要实现的部分
@@ -196,38 +206,67 @@ class StagePage(QWidget):
         """
         if self.tasks.busy:
             return False
+        if not self.jobs.claim(self, label or "任务"):
+            # **必须说清是谁在跑**：静默返回 False 会让按钮看起来坏了
+            self.log.append_line(f"[提示] {self.jobs.blocked_message()}")
+            return False
         if label:
             self.log.append_line(f"[{label}] 开始")
         name = label or "正在运行"
         self.log_panel.begin_busy(name)
-        self._set_actions_enabled(False)
 
         task = self.tasks.start(job)
 
-        def finish(result):
-            self._end_busy(f"{name}完成")
-            on_done(result)
-
-        def fail(message: str):
-            # ⚠️ 任务抛异常时 `finished` **不会**触发。不接这个信号的话，
-            # 进度条会一直转下去，看起来像卡死——比不提示还糟。
-            self.log.append_line(f"[{name}] 失败：{message}")
-            self._end_busy("失败")
-
-        def cancelled():
-            self.log.append_line(f"[{name}] 已取消")
-            self._end_busy("已取消")
-
+        # ⚠️ **必须连绑定方法，不能连闭包。**
+        #
+        # `Task` 被 `moveToThread()` 了，`finished` / `failed` 是在**工作线程**里
+        # emit 的。连普通闭包（或者普通函数）时 Qt 判定为**直连**，处理器就在
+        # 工作线程里跑；而它要禁用按钮、停计时器、刷进度条 —— 全是 Qt 控件操作，
+        # 非 GUI 线程里做这些是未定义行为：有时"看起来能用"，有时什么都不做，
+        # 还会打印 `QObject::killTimer: Timers cannot be stopped from another thread`。
+        #
+        # 连**主线程 QObject 的绑定方法**时，Qt 才知道接收者在哪个线程，
+        # 于是自动排队回主线程执行。（日志的 `task.line.connect(self.log.append_line)`
+        # 一直是这么连的，所以日志从来没出过问题 —— 差别就在这里。）
+        self._pending_done = on_done
+        self._pending_label = name
         task.line.connect(self.log.append_line)
-        task.finished.connect(finish)
-        task.failed.connect(fail)
-        task.cancelled.connect(cancelled)
+        task.finished.connect(self._on_task_finished)
+        task.failed.connect(self._on_task_failed)
+        task.cancelled.connect(self._on_task_cancelled)
         return True
+
+    def _on_task_finished(self, result) -> None:
+        self._end_busy(f"{self._pending_label}完成")
+        callback, self._pending_done = self._pending_done, None
+        if callback is not None:
+            callback(result)
+
+    def _on_task_failed(self, message: str) -> None:
+        self.log.append_line(f"[{self._pending_label}] 失败：{message}")
+        self._end_busy("失败")
+        self._pending_done = None
+
+    def _on_task_cancelled(self) -> None:
+        self.log.append_line(f"[{self._pending_label}] 已取消")
+        self._end_busy("已取消")
+        self._pending_done = None
 
     def _end_busy(self, text: str) -> None:
         self.log_panel.end_busy(text)
-        # 先全部打开，再让页面自己按"环境就绪没有"关掉该关的 ——
-        # `refresh_buttons()` 是各页面实现的，只有它知道哪些不该开。
+        # 释放占用 → 触发 changed → 各页（含自己）恢复按钮。
+        # 按钮状态统一由 `_on_jobs_changed` 管，这里不要另外去动。
+        self.jobs.release(self)
+
+    def _on_jobs_changed(self) -> None:
+        """有人（可能是我自己）在跑 → 我的按钮也禁用。
+
+        **自己页面正在跑的时候也要禁用** —— 不然用户能在这页乱点，
+        点了又没反应（`start()` 返回 False）。
+        """
+        if self.jobs.busy:
+            self._set_actions_enabled(False)
+            return
         self._set_actions_enabled(True)
         self.refresh_buttons()
 
