@@ -103,6 +103,46 @@ def test_env_image_not_required_when_mock_backend():
     assert not any("镜像" in b for b in status.blockers)
 
 
+def test_env_separates_not_chosen_from_not_imported():
+    """「还没选」和「选了但没导入」必须分开说 —— 两者的下一步动作完全不同。"""
+    not_chosen = status_of(RunContext(docker_ok=True), Stage.ENV)
+    assert any("还没选" in b for b in not_chosen.blockers)
+
+    chosen = status_of(
+        RunContext(docker_ok=True, image_selected="RDK X5 / OpenExplorer v1.2.8（CPU 版）"),
+        Stage.ENV,
+    )
+    assert any("还没导入" in b for b in chosen.blockers)
+    assert any("RDK X5" in b for b in chosen.blockers), "要说清选的是哪一个"
+
+
+def test_env_does_not_guess_an_image():
+    """门禁**不替用户猜**镜像。
+
+    `image_ref` 只在镜像**确实在本机**（环境页 `find_loaded` 找到了）时才有值。
+    以前环境页会静默兜底到 `specs[0]`，等于"界面没选，代码替你选了"——
+    而猜错一个镜像是几百 MB 到 10 GB 的下载，用户会以为下的是另一个。
+    """
+    # 只"选了名"、没导入 → 仍然阻塞
+    blocked = status_of(RunContext(docker_ok=True, image_selected="某个镜像"), Stage.ENV)
+    assert blocked.state is StageState.BLOCKED
+
+    # 导入之后才算就绪，而且警告里要写清到底用的是哪个镜像
+    ready = status_of(
+        RunContext(docker_ok=True, image_ref="img:1", image_selected="某个镜像"),
+        Stage.ENV,
+    )
+    assert ready.state is StageState.DONE
+    assert any("img:1" in w for w in ready.warnings)
+
+
+def test_env_default_context_is_blocked():
+    """全新的 RunContext 必须是阻塞态 —— 默认值不能是"就当环境好了"。"""
+    status = status_of(RunContext(), Stage.ENV)
+    assert status.state is StageState.BLOCKED
+    assert len(status.blockers) == 2, "Docker 和镜像各一条"
+
+
 # --------------------------------------------------------------------------
 # S1 浮点模型准备
 # --------------------------------------------------------------------------

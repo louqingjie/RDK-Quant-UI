@@ -216,6 +216,9 @@ class EnvPage(QWidget):
         box.addWidget(picker_label)
 
         self.image_box = QComboBox()
+        # 未选时显示这句（currentIndex == -1）。**故意不给默认选中项** ——
+        # 见 _resolve_selection()：只自动选中"本机已经导入"的镜像。
+        self.image_box.setPlaceholderText("请选择工具链镜像…")
         self.image_box.setToolTip("选一个工具链镜像。括号里是它对应的芯片架构和本机状态。")
         self.image_box.currentIndexChanged.connect(self._on_image_selected)
         box.addWidget(self.image_box)
@@ -255,15 +258,18 @@ class EnvPage(QWidget):
     # 状态
     # ------------------------------------------------------------------
     def apply_to(self, ctx: RunContext) -> None:
-        """把本页的事实写进流程上下文（Shell 调用）。"""
-        ctx.docker_ok = bool(self.report and self.report.docker.daemon_ok)
-        ctx.image_ref = img.find_loaded(
-            self._selected_spec_or_default().image_ref_hint, self.local
-        )
+        """把本页的事实写进流程上下文（Shell 调用）。
 
-    def _selected_spec_or_default(self) -> img.ImageSpec:
+        **没有选中的镜像时就把 `image_ref` 留空**，交给门禁去挡。
+        以前这里写的是 `_selected_spec_or_default()`，会静默兜底到 `specs[0]` ——
+        等于"界面没选，代码替你选了"，而猜错一个镜像是几百 MB 到 10 GB 的下载。
+        """
+        ctx.docker_ok = bool(self.report and self.report.docker.daemon_ok)
         spec = self.selected_spec()
-        return spec if spec is not None else self.specs[0]
+        ctx.image_selected = spec.display_name if spec else None
+        ctx.image_ref = (
+            img.find_loaded(spec.image_ref_hint, self.local) if spec else None
+        )
 
     def selected_spec(self) -> img.ImageSpec | None:
         """当前下拉栏选中的镜像。下拉栏始终有选中项，所以正常不会返回 None。"""
@@ -423,18 +429,32 @@ class EnvPage(QWidget):
                     self._detail_text(spec, present, size) + (f"\n{spec.note}" if spec.note else ""),
                     Qt.ItemDataRole.ToolTipRole,
                 )
-            # 恢复上次的选择；首次进入就是第 0 项（**有明确的默认值**，
-            # 而不是像表格那样首屏什么都不选）
-            index = 0
-            if self._selected_id:
-                for i, spec in enumerate(self.specs):
-                    if spec.id == self._selected_id:
-                        index = i
-                        break
-            self.image_box.setCurrentIndex(index)
+            # 恢复上次的选择，或在"没什么可决定"时自动选一个（见下）
+            self.image_box.setCurrentIndex(self._resolve_selection())
         finally:
             self._updating = False
         self._update_image_detail()
+
+    def _resolve_selection(self) -> int:
+        """决定下拉栏选哪一项；返回 **-1 表示还没选**。
+
+        * 上次选过的（`_selected_id`）优先恢复 —— 用户的选择不该被刷新弄丢
+        * 否则**只自动选中"本机已经导入"的**那个：镜像已经在本地了，
+          选它不需要下载任何东西，没有可决定的
+        * 一个都没导入 → 保持未选，由 `core/workflow.py` 的环境门禁挡住，
+          并在步骤条上说明"还没选工具链镜像"
+
+        **不替用户猜。** 之前这里是默认选第 0 项，而猜错一个镜像是
+        几百 MB 到 10 GB 的下载 —— 用户会以为下的是另一个。
+        """
+        if self._selected_id:
+            for index, spec in enumerate(self.specs):
+                if spec.id == self._selected_id:
+                    return index
+        for index, spec in enumerate(self.specs):
+            if img.find_loaded(spec.image_ref_hint, self.local):
+                return index
+        return -1
 
     def _on_image_selected(self, _index: int = -1) -> None:
         if self._updating:

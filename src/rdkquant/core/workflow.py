@@ -167,6 +167,9 @@ class RunContext:
     # --- S0 环境 ---
     docker_ok: bool = False
     image_ref: str | None = None
+    #: 用户在下拉栏里**选中**的镜像名（可能还没导入本机）。
+    #: 用来把"还没选"和"选了但没导入"分开——两者的下一步动作完全不同。
+    image_selected: str | None = None
     image_required: bool = True
 
     # --- S1 模型 ---
@@ -226,11 +229,27 @@ class StageStatus:
 # 评估
 # --------------------------------------------------------------------------
 def _env_status(ctx: RunContext) -> StageStatus:
+    """环境门禁。
+
+    **故意不替用户猜镜像。** `image_ref` 只在镜像**确实在本机**（`find_loaded`
+    找到了）时才有值；用户没选就是 None，这里挡下来。
+    猜错一个镜像是几百 MB 到 10 GB 的下载，不能靠"大概是第一个吧"。
+    """
     missing: list[str] = []
     if not ctx.docker_ok:
         missing.append("Docker 不可用 —— 去「环境准备」页按体检结果处理。")
     if ctx.image_required and not ctx.image_ref:
-        missing.append("尚未导入 OpenExplorer 工具链镜像 —— 去「环境准备」页选一个下载并导入。")
+        if ctx.image_selected:
+            # 选了但没导入 —— 下一步很明确
+            missing.append(
+                f"选的是「{ctx.image_selected}」，但它还没导入本机 —— "
+                "在「环境准备」页点「下载并导入所选镜像」。"
+            )
+        else:
+            missing.append(
+                "还没选工具链镜像 —— 去「环境准备」页选一个"
+                "（本机已经有的会自动选中）。"
+            )
     if missing:
         return StageStatus(Stage.ENV, StageState.BLOCKED, missing)
     name = ctx.image_ref or "未指定镜像"

@@ -396,7 +396,12 @@ def test_probed_size_reaches_the_detail_line(shell, qapp, monkeypatch):
     page.refresh_report()
     assert _wait_for(lambda: bool(page._remote_sizes), qapp)
 
-    # 1_500_000_000 字节 ≈ 1.40 GiB
+    # 本机一个镜像都没导入（fixture 把 local_images 桩成空）→ **故意不选中**
+    assert page.selected_spec() is None, "没有可用的镜像时不该替用户猜一个"
+    assert page.image_detail.text() == "—"
+
+    # 选中之后，详情行要显示**探测到的**体积，而不是清单里的估算值
+    page.image_box.setCurrentIndex(0)
     detail = page.image_detail.text()
     assert "1.40 GB" in detail, f"详情行没跟上真实体积：{detail}"
 
@@ -637,10 +642,16 @@ def test_backend_is_built_when_environment_is_ready(shell, monkeypatch, tmp_path
         daemon_ok=True, daemon_version="29.1.3",
     )
     shell.env_page.report = report
+    # 桩 `probe_host`：`refresh_report()` 会**重新探测并覆盖** report，
+    # 只设 `shell.env_page.report` 的话会被 fixture 的"没 Docker"版本盖掉。
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
     monkeypatch.setattr(
         env_mod.img, "find_loaded",
         lambda *a, **k: "openexplorer/ai_toolchain_ubuntu_20_x5_cpu:v1.2.8-py310",
     )
+    # 让下拉栏重新解析选择：find_loaded 现在说有镜像 → 会**自动选中**它。
+    # 没有这一步就什么都没选，环境门禁按设计挡下来，测不到 make_backend。
+    shell.env_page.refresh_report()
 
     # 不该抛异常
     shell.refresh_workflow()
@@ -660,7 +671,9 @@ def test_backend_is_cached_across_refreshes(shell, monkeypatch, tmp_path: Path):
     report = _fake_report()
     report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
     shell.env_page.report = report
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
     monkeypatch.setattr(env_mod.img, "find_loaded", lambda *a, **k: "img:tag")
+    shell.env_page.refresh_report()        # 让下拉栏自动选中已导入的那个
 
     # 先刷新一次让 context.image_ref 填上（它由 env 页在 refresh 时写入），
     # 再取后端——顺序反了会拿到 None，测的就不是缓存了。

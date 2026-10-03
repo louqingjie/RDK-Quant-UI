@@ -277,9 +277,12 @@ class AppShell(QMainWindow):
             self._backend = None
             return None
 
-        spec = self.env_page.selected_spec() or (
-            self.env_page.specs[0] if self.env_page.specs else None
-        )
+        spec = self.env_page.selected_spec()
+        if spec is None:
+            # image_ref 有值却没选中镜像 = 状态不一致。宁可当作未就绪，
+            # **不要**兜底成 specs[0] —— 那会把 march 也算错，量化到错的芯片上。
+            self._backend = None
+            return None
         march = getattr(spec, "march", None) or "bayes-e"
 
         cached = self._backend
