@@ -351,3 +351,22 @@ def test_container_paths_are_workspace_relative():
     assert ws.rel(ws.model_dir / "m.onnx") == "/workspace/model/m.onnx"
     assert ws.rel(ws.calib_dir) == "/workspace/cal_images"
     assert PROBE_CONTAINER_PATH.startswith("/workspace/")
+
+
+def test_rel_dot_is_the_form_config_yaml_wants():
+    """`config.yaml` 里的路径一律**相对**形式（`./model/x.onnx`）。
+
+    两种形式容器里都能用（工作目录就是 /workspace），但官方写的是相对形式，
+    而且真跑验证过的是 `./model/0708.onnx` 那一种。见 docs/design/config-yaml.md。
+    """
+    ws = B.Workspace(Path("/tmp/whatever"))
+    assert ws.rel_dot(ws.model_dir / "m.onnx") == "./model/m.onnx"
+    assert ws.rel_dot(ws.calib_dir) == "./cal_images"
+
+
+def test_rel_dot_leaves_outside_paths_alone():
+    """workspace 之外的路径原样返回 —— 和 `rel()` 一致，不编一个假路径出来。"""
+    ws = B.Workspace(Path("/tmp/whatever"))
+    outside = Path("/somewhere/else/m.onnx")
+    assert ws.rel_dot(outside) == str(outside)
+    assert ws.rel(outside) == str(outside)

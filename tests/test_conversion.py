@@ -100,6 +100,25 @@ def test_input_source_is_a_dict_under_compiler_parameters():
     assert source == {"images": "pyramid"}
 
 
+def test_multi_input_splits_input_source_into_one_key_each():
+    """多输入时官方约定 `input_name` 用 `;` 分隔，`input_source` 要**逐个**给键。
+
+    整串当一个键的话，工具会去找一个名叫 `data1;data2` 的输入，找不到。
+    这也正是 `input_source` 必须是 dict 的原因 —— 它是按输入名查的映射。
+    """
+    data = yaml.safe_load(render_config(make_spec(input_name="data1;data2")))
+    assert data["input_parameters"]["input_name"] == "data1;data2"
+    assert data["compiler_parameters"]["input_source"] == {
+        "data1": "pyramid", "data2": "pyramid",
+    }
+
+
+def test_input_names_property_handles_spaces_and_empties():
+    spec = make_spec(input_name=" a ; ; b ")
+    assert spec.input_names == ("a", "b")
+    assert make_spec(input_name="only").input_names == ("only",)
+
+
 def test_preprocess_on_is_a_real_bool():
     data = yaml.safe_load(render_config(make_spec(preprocess_on=True)))
     assert data["calibration_parameters"]["preprocess_on"] is True

@@ -38,6 +38,9 @@ OUTPUT_DIR = "output"
 LOG_DIR = "logs"
 CONFIG_NAME = "config.yaml"
 
+#: 容器里的挂载点。`Workspace.rel()` / `rel_dot()` 都基于它。
+CONTAINER_ROOT = "/workspace"
+
 
 @dataclass
 class Workspace:
@@ -82,7 +85,23 @@ class Workspace:
             rel = p.resolve().relative_to(self.root.resolve())
         except (ValueError, OSError):
             return str(p)
-        return "/workspace/" + rel.as_posix()
+        return CONTAINER_ROOT + "/" + rel.as_posix()
+
+    def rel_dot(self, path: os.PathLike | str) -> str:
+        """转成容器内的**相对**路径（`./model/x.onnx`），给 `config.yaml` 用。
+
+        `rel()` 给的是绝对形式，两者都能用 —— 容器的工作目录就是 `/workspace`。
+        之所以还要这个：`config.yaml` 里的路径**官方一律写相对形式**
+        （`working_dir`、`cal_data_dir` 都是），而且真跑验证过的是
+        `./model/0708.onnx` 这一种（见 `docs/design/config-yaml.md`）。
+
+        不在 workspace 内则原样返回（和 `rel()` 一致）。
+        """
+        absolute = self.rel(path)
+        prefix = CONTAINER_ROOT + "/"
+        if absolute.startswith(prefix):
+            return "./" + absolute[len(prefix):]
+        return absolute
 
 
 # --------------------------------------------------------------------------

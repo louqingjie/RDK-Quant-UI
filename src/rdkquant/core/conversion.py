@@ -106,6 +106,17 @@ class ConversionSpec:
     def needs_calibration_data(self) -> bool:
         return self.calibration_type not in CALIB_TYPES_WITHOUT_DATA
 
+    @property
+    def input_names(self) -> tuple[str, ...]:
+        """单个输入名，或按官方约定用 `;` 分隔的多个。
+
+        `S1` 给的 `input_name` 就是 `";".join(names)`（见 `ui/pages/model.py`），
+        `config.yaml` 的 `input_name` 也照原样写；但 `input_source` 要**逐个**
+        输入一个键 —— 那是按名字查的映射。
+        """
+        parts = [chunk.strip() for chunk in str(self.input_name).split(";")]
+        return tuple(part for part in parts if part) or (str(self.input_name),)
+
 
 def _quote(value: object) -> str:
     """YAML 单引号标量。**一律加引号** —— 值里有 `:`、`#`、前导/尾随空格都不出事。
@@ -166,8 +177,12 @@ def render_config(spec: ConversionSpec) -> str:
     lines.append(f"  compile_mode: {_quote(spec.compile_mode)}")
     lines.append(f"  optimize_level: {_quote(spec.optimize_level)}")
     lines.append("  debug: false")
+    # `input_source` 是**按输入名映射的 dict**（这也解释了它为什么必须是 dict
+    # 而不是字符串）。多输入时官方约定 `input_name` 用 `;` 分隔，所以这里也要
+    # 跟着拆成多个键 —— 整串当一个键的话工具找不到名为 `a;b` 的输入。
     lines.append("  input_source:")
-    lines.append(f"    {_quote(spec.input_name)}: {_quote(spec.input_source)}")
+    for one in spec.input_names:
+        lines.append(f"    {_quote(one)}: {_quote(spec.input_source)}")
     lines.append("")
 
     return "\n".join(lines)

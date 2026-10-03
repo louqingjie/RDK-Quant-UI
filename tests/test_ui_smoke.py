@@ -946,37 +946,60 @@ def test_cli_subcommands_are_registered(argv):
 # local_images 打了桩）。自己另建 QApplication 会让整个测试进程炸成
 # access violation —— 实测踩过，所以别在别的文件里再管 QApplication。
 # --------------------------------------------------------------------------
+def _step_page(shell, stage):
+    """按阶段取步骤页。
+
+    **别写下标，也别按位置解包。** 这两种写法在加页面时会静默错位：
+    S4 落地那天 `stage_pages` 多了一个，四处 `a, b, c = shell.stage_pages`
+    一起报 `too many values to unpack`；而 `stage_pages[2]` 这种只是**恰好**
+    还对（CONVERT 追加在末尾），下一次在中间插页面就会指向错的页。
+    """
+    for page in shell.stage_pages:
+        if page.spec.stage is stage:
+            return page
+    raise AssertionError(f"没有 {stage} 对应的步骤页")
+
+
 def test_stage_pages_are_wired_in_flow_order(shell):
-    """顺序必须是 MODEL → CHECK → CALIB。
+    """顺序必须是 MODEL → CHECK → CALIB → CONVERT。
 
     检查页靠 `ctx.model_path` 判断"模型换了没有"，所以模型页必须先写路径。
     顺序反了会让失效判断读到上一轮的值，等于没做。
+
+    转换页排在最后：它读 S1 的模型路径、S2 的检查结论、S3 的校准目录，
+    少一个就转不了。
     """
-    from rdkquant.ui.pages import CalibPage, CheckPage, ModelPage
+    from rdkquant.ui.pages import CalibPage, CheckPage, ConvertPage, ModelPage
 
     kinds = [type(page) for page in shell.stage_pages]
-    assert kinds == [ModelPage, CheckPage, CalibPage]
+    assert kinds == [ModelPage, CheckPage, CalibPage, ConvertPage]
     assert [p.spec.stage for p in shell.stage_pages] == [
-        Stage.MODEL, Stage.CHECK, Stage.CALIB,
+        Stage.MODEL, Stage.CHECK, Stage.CALIB, Stage.CONVERT,
     ]
 
 
 def test_unfinished_steps_still_use_placeholder(shell):
     from rdkquant.ui.pages import PlaceholderPage
 
-    assert isinstance(shell.pages[Stage.CONVERT.value], PlaceholderPage)
+    # S4 落地了，剩下的还是占位页
+    assert not isinstance(shell.pages[Stage.CONVERT.value], PlaceholderPage)
     assert isinstance(shell.pages[Stage.PERF.value], PlaceholderPage)
+    assert isinstance(shell.pages[Stage.ACCURACY.value], PlaceholderPage)
 
 
 def test_without_environment_actions_are_disabled_and_explained(shell):
     """没环境时应当**禁用并引导**，而不是等用户点了再报错。"""
-    model, check, calib = shell.stage_pages
+    model = _step_page(shell, Stage.MODEL)
+    check = _step_page(shell, Stage.CHECK)
+    calib = _step_page(shell, Stage.CALIB)
+    convert = _step_page(shell, Stage.CONVERT)
     assert shell.current_backend() is None
     assert not model.pick_btn.isEnabled()
     assert not check.run_btn.isEnabled()
     assert not calib.scan_btn.isEnabled()
     assert not calib.build_btn.isEnabled()
-    for page in (model, check, calib):
+    assert not convert.run_btn.isEnabled()
+    for page in (model, check, calib, convert):
         hint = page.environment_hint()
         assert "环境准备" in hint and "镜像" in hint
 
@@ -986,7 +1009,8 @@ def test_changing_the_model_invalidates_a_passing_check(shell, tmp_path: Path):
 
     门禁一旦放行一个从未被检查过的模型，用户会拿着错误结论往下走。
     """
-    model, check, _calib = shell.stage_pages
+    model = _step_page(shell, Stage.MODEL)
+    check = _step_page(shell, Stage.CHECK)
     old = tmp_path / "run" / "model" / "old.onnx"
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_bytes(b"x")
@@ -1259,7 +1283,8 @@ def test_check_page_uses_the_model_s1_picked(shell, tmp_path: Path):
     (model_dir / "0526.onnx").write_bytes(b"old")
     (model_dir / "0708.onnx").write_bytes(b"new")
 
-    model, check, _calib = shell.stage_pages
+    model = _step_page(shell, Stage.MODEL)
+    check = _step_page(shell, Stage.CHECK)
     model.model_path = model_dir / "0708.onnx"
     shell.refresh_workflow()
 
@@ -1278,7 +1303,7 @@ def test_check_failure_is_not_reported_as_a_format_problem(shell, tmp_path: Path
     model = model_dir / "m.onnx"
     model.write_bytes(b"x")
 
-    _model_page, check, _calib = shell.stage_pages
+    check = _step_page(shell, Stage.CHECK)
     check.checked_model = model
     check.log_path = None
     check._on_checked((255, ["2026-01-01 00:00:00,000 ERROR something broke"]))
@@ -1425,3 +1450,162 @@ def test_calib_page_geometry_with_real_tiles(shell, qapp, tmp_path: Path):
 
     assert uigeom.visible_indexes(page.grid), "网格里得有可见条目，否则这条等于没测"
     assert uigeom.check_all(page) == []
+
+
+# --------------------------------------------------------------------------
+# S4 模型量化与编译页
+# --------------------------------------------------------------------------
+def _arm_convert(shell, tmp_path: Path):
+    """把 S4 页带到一个"该有的都有"的状态，用的还是 mock 后端。"""
+    from rdkquant.core.backends import MockBackend, Workspace
+    from rdkquant.core.workflow import CalibSummary
+
+    page = _step_page(shell, Stage.CONVERT)
+    workspace = Workspace(tmp_path / "run").ensure()
+    # 桩掉 `backend()`：环境门禁在这里不是被测对象，
+    # 走 `current_backend()` 得先把 Docker 和镜像都伪装就绪，那是环境页的测试
+    page.backend = lambda: MockBackend(workspace=workspace, march="bayes-e", delay=0.0)
+
+    ctx = shell.context
+    model = workspace.model_dir / "0708.onnx"
+    model.write_bytes(b"not-a-real-onnx")
+    ctx.model_path = model
+    ctx.suggested_input_parameters = {
+        "input_name": "images",
+        "input_shape": "1x3x640x640",
+        "input_layout_train": "NCHW",
+        "input_type_train": "rgb",
+    }
+    ctx.calibration_type = "skip"
+    ctx.calib = CalibSummary(count=0, cal_data_dir="calib_bin_f32")
+    ctx.checker_passed = True
+    return page, workspace, ctx
+
+
+def test_convert_page_replaces_the_placeholder(shell):
+    """S4 不再是占位页 —— 这一条是 M4 最直接的验收。"""
+    from rdkquant.ui.pages import ConvertPage, PlaceholderPage
+
+    page = _step_page(shell, Stage.CONVERT)
+    assert isinstance(page, ConvertPage)
+    assert not isinstance(shell.pages[Stage.CONVERT.value], PlaceholderPage)
+
+
+def test_convert_page_refuses_without_a_model_and_says_why(shell, qapp):
+    """缺东西时**说清缺什么**，而不是生成一份缺参数的 config.yaml。"""
+    page = _step_page(shell, Stage.CONVERT)
+    shell.context.model_path = None
+    assert page.conversion_spec(shell.context) is None
+
+    shell.context.model_path = Path("x.onnx")
+    shell.context.suggested_input_parameters = {}
+    assert page.conversion_spec(shell.context) is None, "没有输入形状就不该生成配置"
+
+
+def test_convert_page_writes_config_yaml(shell, tmp_path, qapp):
+    """点「开始转换」前必须先落盘 config.yaml —— 没有它 makertbin 起不来。"""
+    import yaml
+
+    page, workspace, _ctx = _arm_convert(shell, tmp_path)
+    page._on_run()
+    assert _wait_for(lambda: page.verdict is not None, qapp)
+
+    config = workspace.config_path
+    assert config.is_file()
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert data["model_parameters"]["onnx_model"] == "./model/0708.onnx"
+    assert data["model_parameters"]["working_dir"] == "./output"
+    assert data["model_parameters"]["march"] == "bayes-e"
+    assert data["calibration_parameters"]["calibration_type"] == "skip"
+
+
+def test_convert_page_end_to_end_produces_five_artifacts(shell, tmp_path, qapp):
+    """**M4 的核心回归**：点一次真的产出 5 个文件，三项校验全过。"""
+    page, workspace, _ctx = _arm_convert(shell, tmp_path)
+    page._on_run()
+    assert _wait_for(lambda: page.verdict is not None, qapp), "转换没回来"
+
+    assert page.verdict.ok, page.verdict.checks
+    names = sorted(p.name for p in workspace.output_dir.iterdir())
+    assert names == [
+        "0708.bin",
+        "0708_calibrated_model.onnx",
+        "0708_optimized_float_model.onnx",
+        "0708_original_float_model.onnx",
+        "0708_quantized_model.onnx",
+    ]
+
+
+def test_convert_page_writes_results_into_the_context(shell, tmp_path, qapp):
+    """结论必须进 `RunContext` —— **否则 S5 永远解锁不了**。"""
+    from rdkquant.core.workflow import StageState
+
+    page, _workspace, ctx = _arm_convert(shell, tmp_path)
+    page._on_run()
+    assert _wait_for(lambda: page.verdict is not None, qapp)
+
+    shell.refresh_workflow()          # 会把每页的 apply_to 跑一遍
+    assert set(ctx.artifacts) == {
+        "original_float_model", "optimized_float_model",
+        "calibrated_model", "quantized_model", "bin",
+    }
+    assert ctx.conversion_checks and all(ctx.conversion_checks.values())
+
+    status = {s.stage: s for s in shell.statuses}[Stage.CONVERT]
+    assert status.state is StageState.DONE, status.blockers
+
+
+def test_convert_page_clears_stale_output_before_running(shell, tmp_path, qapp):
+    """失败也会往 output/ 里写东西（实测 shape_inference_fail.onnx）——
+    不清的话上一次的残留会把「5 个产出物齐全」喂成假通过。"""
+    page, workspace, _ctx = _arm_convert(shell, tmp_path)
+    stale = workspace.output_dir / "shape_inference_fail.onnx"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"stale")
+
+    page._on_run()
+    assert _wait_for(lambda: page.verdict is not None, qapp)
+    assert not stale.exists(), "上次失败的残留必须被清掉"
+
+
+def test_convert_page_override_checkbox_reaches_the_context(shell, qapp):
+    """「跳过模型检查」要真的进 `conversion_override`，否则门禁不认。"""
+    page = _step_page(shell, Stage.CONVERT)
+    ctx = shell.context
+    page.override_box.setChecked(True)
+    page.apply_to(ctx)
+    assert ctx.conversion_override is True
+    page.override_box.setChecked(False)
+    page.apply_to(ctx)
+    assert ctx.conversion_override is False
+
+
+def test_convert_page_shows_the_calibration_time_estimate(shell, qapp):
+    """校准很慢（实测每张约 164 秒），界面必须**事先说**。
+
+    380 张 = 17 小时，用户点一下要等一整晚 —— 不说的话这是最糟的一种"卡住"。
+    """
+    from rdkquant.core.workflow import CalibSummary
+
+    page = _step_page(shell, Stage.CONVERT)
+    ctx = shell.context
+    ctx.calibration_type = "default"
+    ctx.calib = CalibSummary(count=380, cal_data_dir="calib_bin_f32")
+    page._update_estimate()
+
+    text = page.estimate_label.text()
+    assert "380" in text
+    assert "小时" in text
+    assert "参考" in text, "必须标明是参考值 —— 换机器换模型就不准"
+    assert "建议" in text, "这么久要给一条行动建议（筛到 100 张以内）"
+
+
+def test_convert_page_estimate_is_quiet_when_calibration_is_not_needed(shell, qapp):
+    from rdkquant.core.workflow import CalibSummary
+
+    page = _step_page(shell, Stage.CONVERT)
+    ctx = shell.context
+    ctx.calibration_type = "skip"
+    ctx.calib = CalibSummary(count=380, cal_data_dir="calib_bin_f32")
+    page._update_estimate()
+    assert page.estimate_label.text() == "", "skip 不需要校准数据，不该报耗时"

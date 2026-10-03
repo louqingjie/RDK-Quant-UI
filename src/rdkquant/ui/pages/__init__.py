@@ -9,6 +9,7 @@
 
 from .calib import CalibPage
 from .check import CheckPage
+from .convert import ConvertPage
 from .env import EnvPage, fit_table_height
 from .model import ModelPage
 from .placeholder import PlaceholderPage
@@ -18,6 +19,7 @@ from .toolbox import ToolboxPage
 __all__ = [
     "CalibPage",
     "CheckPage",
+    "ConvertPage",
     "EnvPage",
     "ModelPage",
     "PlaceholderPage",

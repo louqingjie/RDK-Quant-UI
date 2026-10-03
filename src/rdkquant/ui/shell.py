@@ -37,6 +37,7 @@ from .workers import JobCoordinator
 from .pages import (
     CalibPage,
     CheckPage,
+    ConvertPage,
     EnvPage,
     ModelPage,
     PlaceholderPage,
@@ -254,6 +255,7 @@ class AppShell(QMainWindow):
             Stage.MODEL: ModelPage,
             Stage.CHECK: CheckPage,
             Stage.CALIB: CalibPage,
+            Stage.CONVERT: ConvertPage,
         }
 
         for spec in STAGES:
