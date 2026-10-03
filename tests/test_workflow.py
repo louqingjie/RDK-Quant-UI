@@ -276,16 +276,41 @@ def test_convert_failed_when_partial_artifacts_only():
     assert any(".bin" in b for b in status.blockers)
 
 
-def test_convert_failed_when_three_way_check_fails():
+def test_convert_done_but_warns_when_three_way_check_fails():
     """官方要求三方面齐全才算成功：控制台字样 / 相似度表 / 5 个产出物。
-    任一项缺失都必须判定为失败，哪怕 .bin 已经存在。"""
+
+    **`.bin` 在了就算 DONE，但失败项必须出现在 `warnings` 里。**
+
+    这条原来叫 `..._failed_when_three_way_check_fails`，docstring 写着
+    「任一项缺失都必须判定为失败，哪怕 `.bin` 已经存在」，而断言是 `DONE`
+    —— 文档和代码互相矛盾。按 `docs/README.md` 的规矩（冲突时先假设代码对）
+    改的是文档，不是代码：`.bin` 是**可用的**，而 S5 性能 / S6 精度正是用来
+    发现精度问题的，把它们挡掉等于让用户没法测。
+
+    但代码当时**漏了一件事**：`.bin` 存在时直接 `return DONE`，
+    `conversion_checks` 里的失败项**完全看不见** —— 用户会拿着一个精度已劣化的
+    `.bin` 被告知"完成"。现在这些失败项会进 `warnings`，而
+    `shell.refresh_workflow` 用 `status.blockers or status.warnings`
+    显示它。这条断言就是守着那件事。
+    """
     ctx = _convertible(
         artifacts={ARTIFACT_BIN: Path("out/model.bin")},
         conversion_checks={"控制台成功字样": True, "余弦相似度表": False, "5 个产出物": True},
     )
-    # bin 存在时按"完成"处理，但校验失败的信息仍然要能拿到
     status = status_of(ctx, Stage.CONVERT)
     assert status.state is StageState.DONE
+    assert status.warnings, "校验失败的项必须说出来，不能悄悄 DONE"
+    assert "余弦相似度表" in status.warnings[0]
+
+
+def test_convert_done_with_no_warning_when_every_check_passes():
+    ctx = _convertible(
+        artifacts={ARTIFACT_BIN: Path("out/model.bin")},
+        conversion_checks={"控制台成功字样": True, "余弦相似度表": True, "5 个产出物": True},
+    )
+    status = status_of(ctx, Stage.CONVERT)
+    assert status.state is StageState.DONE
+    assert status.warnings == []
 
 
 def test_convert_reports_which_check_failed_when_no_bin():

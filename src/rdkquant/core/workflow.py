@@ -310,12 +310,26 @@ def _calib_status(ctx: RunContext) -> StageStatus:
 
 def _convert_status(ctx: RunContext) -> StageStatus:
     present = ctx.present_artifacts
+    failed = [name for name, ok in ctx.conversion_checks.items() if not ok]
+
     if ARTIFACT_BIN in present:
-        return StageStatus(Stage.CONVERT, StageState.DONE)
+        # `.bin` 在就算转换跑完了 —— 但**校验失败必须说出来**。
+        #
+        # 原先这里直接 `return StageStatus(..., DONE)`，失败项完全看不见：
+        # 用户会拿着一个精度已经劣化的 `.bin` 被告知"完成"，然后直接上板。
+        #
+        # 仍然给 DONE 而不是 FAILED，是因为 **S5 性能 / S6 精度正是用来发现
+        # 精度问题的**；把它们挡掉等于让用户没法测。所以这里是警告不是阻断。
+        warnings = []
+        if failed:
+            warnings.append(
+                f"转换成功校验未通过：{'、'.join(failed)}。"
+                "模型可以上板，但建议先看性能与精度评估。"
+            )
+        return StageStatus(Stage.CONVERT, StageState.DONE, warnings=warnings)
 
     # 产物存在但没跑完三方面校验 —— 官方要求三项齐全才算转换成功
-    if ctx.conversion_checks and not all(ctx.conversion_checks.values()):
-        failed = [name for name, ok in ctx.conversion_checks.items() if not ok]
+    if failed:
         return StageStatus(
             Stage.CONVERT,
             StageState.FAILED,
