@@ -60,7 +60,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QIcon, QImage
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QListView
 
 from .. import calibimages
@@ -133,6 +133,11 @@ class ThumbnailModel(QAbstractListModel):
 
     为什么不用 `QStandardItemModel`：PySide6 里没法覆写它的 `data()`，
     而"请求到了才解码"正需要挂在那上面。
+
+    ⚠️ **没缓存时不能返回空 `QIcon()`。** 条目的高度由 delegate 的 `sizeHint`
+    算，而它包含图标的尺寸 —— 空图标会让 hint 只剩文字高度（实测 14 px），
+    再被 `setUniformItemSizes(True)` 用到全部条目上，结果 96 px 的图直接压在
+    邻居的名字和勾选框上。所以要用**正确尺寸的透明占位图**。
     """
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -141,6 +146,8 @@ class ThumbnailModel(QAbstractListModel):
         self._paths: list[Path] = []
         self._checked: list[bool] = []
         self._icons: dict[int, QIcon] = {}
+        #: 还没解码出来时用的占位图。**必须非空、且尺寸正确** —— 见类注释。
+        self.placeholder = QIcon()
         #: 有人要看某个格子的图标 → 回调它（网格负责登记并异步解码）
         self.on_icon_needed: Callable[[int], None] | None = None
 
@@ -161,11 +168,12 @@ class ThumbnailModel(QAbstractListModel):
             icon = self._icons.get(row)
             if icon is not None:
                 return icon
-            # 没缓存 → **登记请求，先返回空图标**。Qt 会在结果到达后
-            # （我们发 dataChanged）重新来问一次。
+            # 没缓存 → **登记请求，先返回透明占位图**（**不是空 QIcon**，
+            # 原因见类注释：空图标会把条目高度算成只剩文字）。
+            # Qt 会在结果到达后（我们发 dataChanged）重新来问一次。
             if self.on_icon_needed is not None:
                 self.on_icon_needed(row)
-            return QIcon()
+            return self.placeholder
         if role == Qt.ItemDataRole.CheckStateRole:
             return Qt.CheckState.Checked if self._checked[row] else Qt.CheckState.Unchecked
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -253,6 +261,12 @@ class ThumbnailGrid(QListView):
 
         self._model = ThumbnailModel(self)
         self._model.on_icon_needed = self._request_icon
+        # 占位图必须是**正确尺寸的透明图**，不能是空图标 ——
+        # 否则 delegate 把条目高度算成只剩文字（实测 14 px），
+        # 96 px 的缩略图就会压到邻居的名字和勾选框上。
+        blank = QPixmap(self.iconSize())
+        blank.fill(Qt.GlobalColor.transparent)
+        self._model.placeholder = QIcon(blank)
         # 用户点勾选框时，视图会走 `model.setData(CheckStateRole)` ——
         # 那是**唯一**的交互入口，得从这儿接回 `checkedChanged`
         self._model.dataChanged.connect(self._on_data_changed)

@@ -103,8 +103,46 @@ def test_icon_is_only_requested_when_asked(qapp, real_images: Path):
     from PySide6.QtCore import Qt
 
     icon = widget._model.data(widget._model.index(3, 0), Qt.ItemDataRole.DecorationRole)
-    assert icon is not None and icon.isNull(), "没有缓存时先给空图标"
+    assert icon is not None and not icon.isNull(), (
+        "没有缓存时给的是**透明占位图**，不是空图标 —— "
+        "空图标会让 delegate 把条目高度算成只剩文字（见下一条测试）"
+    )
     assert widget._pending == {3}, "只该登记被问到的那一行"
+
+
+def test_item_rect_is_tall_enough_for_icon_and_name(qapp, real_images: Path):
+    """**条目必须高到能装下图 + 文件名。**
+
+    实测踩过的 bug：没缓存时 `DecorationRole` 返回的是**空 `QIcon()`**，
+    delegate 于是按"只有文字"算高度：
+
+        visualRect = x0 y0 w116 **h14**      ← 只剩文字高
+        sizeHintForIndex = 122x14
+
+    再被 `setUniformItemSizes(True)` 用到全部条目上，结果 96 px 的缩略图
+    **直接压在邻居的文件名和勾选框上**（用户截图报的）。
+
+    修法是占位图用**正确尺寸的透明图**。修完 `visualRect` 高 14 → 111。
+    """
+    from PySide6.QtCore import Qt
+
+    widget = ThumbnailGrid()
+    widget.resize(600, 400)
+    widget.show()
+    widget.set_images(real_images)
+    for _ in range(3):
+        qapp.processEvents()
+
+    rect = widget.visualRect(widget._model.index(0, 0))
+    icon_h = widget.iconSize().height()
+    text_h = widget.fontMetrics().height()
+    assert rect.height() >= icon_h + text_h, (
+        f"条目只有 {rect.height()} px 高，装不下图标 {icon_h} + 文字 {text_h}"
+    )
+
+    # 名字真的会被画出来（DisplayRole 非空）
+    name = widget._model.data(widget._model.index(0, 0), Qt.ItemDataRole.DisplayRole)
+    assert name
 
 
 def test_loaded_image_becomes_an_icon(qapp, real_images: Path):
