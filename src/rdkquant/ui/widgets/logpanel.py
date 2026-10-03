@@ -43,7 +43,8 @@ def format_duration(seconds: int) -> str:
 
 
 class LogPanel(QWidget):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, *,
+                 progress: QProgressBar | None = None):
         super().__init__(parent)
         m = METRICS
 
@@ -81,11 +82,18 @@ class LogPanel(QWidget):
         head.addWidget(clear_btn)
         root.addLayout(head)
 
-        self.progress = QProgressBar()
+        # ⚠️ **进度条不属于日志，不放进本面板的布局里。**
+        #
+        # 日志面板是 QDockWidget，可以被折叠 / 浮动 / 关闭；而"正在跑什么、
+        # 跑了多久"必须**一直看得见**。两者放一起的话，用户一按「隐藏日志」，
+        # 忙碌状态就消失了 —— 那正是最需要它的时候。
+        #
+        # 所以外壳把自己状态栏上的那根传进来（见 shell.py），两边共用同一个对象；
+        # 不传就自建一根（独立使用 / 测试）。
+        self.progress = progress if progress is not None else QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat("就绪")
-        root.addWidget(self.progress)
 
         #: 忙碌状态的计时器。存在的意义是**证明它还活着** ——
         #: `docker run` 起来之后可能几分钟不吐一行日志，没有这个，

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -188,8 +189,18 @@ class AppShell(QMainWindow):
         每一步都要看工具链原始输出，做成每页一份既浪费纵向空间，也让
         "跑到一半切页面看日志"变成不可能。做成停靠面板后切页面日志不断，
         用户还能把它关掉腾地方。
+
+        **进度条不在这里** —— 它建在这儿、放到状态栏去（`_build_statusbar`）。
+        日志面板能被折叠/浮动/关闭，而忙碌状态必须一直看得见；
+        用户按下「隐藏日志」的那一刻，往往正是他想知道"还在跑吗"的时候。
         """
-        self.log_panel = LogPanel()
+        self.progress = QProgressBar()
+        self.progress.setMinimumWidth(280)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("就绪")
+        self.progress.setTextVisible(True)
+        self.log_panel = LogPanel(progress=self.progress)
         dock = QDockWidget("执行日志", self)
         dock.setObjectName("LogDock")
         dock.setWidget(self.log_panel)
@@ -218,6 +229,8 @@ class AppShell(QMainWindow):
         self.setStatusBar(bar)
         self.status_note = QLabel("")
         bar.addWidget(self.status_note, 1)
+        # 进度条常驻状态栏：**日志面板藏起来也看得见**
+        bar.addPermanentWidget(self.progress)
         self.log_btn = QPushButton("隐藏日志")
         self.log_btn.setObjectName("Ghost")
         self.log_btn.setToolTip("Ctrl+L")

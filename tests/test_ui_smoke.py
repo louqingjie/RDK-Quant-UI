@@ -432,6 +432,34 @@ def test_cross_page_single_flight(shell, qapp, monkeypatch):
     assert second.start(_slow_job(0.1), lambda _r: None, label="校准数据生成") is True
 
 
+def test_hiding_the_log_keeps_the_progress_bar_visible(shell, qapp, monkeypatch):
+    """「隐藏日志」只能隐藏日志 —— 进度条是全局状态，必须一直看得见。
+
+    进度条原来在 `LogPanel` 的布局里，而 `toggle_log()` 藏的是**整个 dock**：
+    一按「隐藏日志」，进度条连同忙碌状态一起消失 —— 而那往往正是用户想
+    "看看它还在不在跑"的时候。
+
+    现在进度条建在外壳里、挂在状态栏上，`LogPanel` 只是共用同一个对象。
+    """
+    _ready_env(shell, monkeypatch)
+    assert shell.progress is shell.log_panel.progress, "两边必须是同一根进度条"
+
+    shell.log_dock.setVisible(True)
+    qapp.processEvents()
+    shell.toggle_log()
+    qapp.processEvents()
+
+    assert not shell.log_dock.isVisible(), "日志面板应当被藏起来"
+    assert shell.progress.isVisible(), "进度条不能跟着消失"
+
+    # 日志藏起来时跑任务，忙碌状态照样要看得见
+    page = shell.stage_pages[0]
+    assert page.start(_slow_job(), lambda _r: None, label="模型检查") is True
+    qapp.processEvents()
+    assert "模型检查" in shell.progress.format()
+    assert shell.progress.isVisible()
+
+
 def test_log_view_appends_and_roundtrips(qapp):
     from rdkquant.ui.widgets import LogView
 
