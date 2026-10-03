@@ -214,6 +214,135 @@ def test_mock_build_honours_cancellation(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------
+# Mock 的 compile 必须和真 makertbin 对齐
+#
+# 三处原先和实测不符（见 docs/design/makertbin-runtime.md），都会让 mock 路径
+# 测不出真问题：假成功字样、只写一个产物、bin 的名字带一堆后缀。
+# --------------------------------------------------------------------------
+def _compiled(tmp_path: Path):
+    """跑一次假转换，返回 (workspace, backend, 控制台行)。"""
+    from rdkquant.core import conversion as C
+
+    ws = B.Workspace(tmp_path / "run").ensure()
+    C.write_config(ws.config_path, C.ConversionSpec(
+        onnx_model="./model/x.onnx", output_prefix="0708", march="bayes-e",
+        input_name="images", input_shape="1x3x640x640",
+        input_type_train="rgb", input_layout_train="NCHW",
+        calibration_type="skip", cal_data_dir="./calib_bin_f32",
+    ))
+    lines: list[str] = []
+    backend = B.MockBackend(workspace=ws, delay=0.0)
+    assert backend.compile(on_line=lines.append) == 0
+    return ws, lines
+
+
+def test_mock_compile_writes_all_five_artifacts(tmp_path: Path):
+    """只写 `.bin` 的话「5 个产出物」那项在 mock 下**永远**是 False。"""
+    from rdkquant.core.conversion import discover_artifacts, missing_artifacts
+
+    ws, _lines = _compiled(tmp_path)
+    found = discover_artifacts(ws.output_dir)
+    assert missing_artifacts(found) == [], f"缺：{missing_artifacts(found)}"
+    assert set(found) == {
+        "original_float_model", "optimized_float_model",
+        "calibrated_model", "quantized_model", "bin",
+    }
+
+
+def test_mock_artifact_names_take_the_prefix_from_config(tmp_path: Path):
+    """真产物名是 `<output_model_file_prefix>_<阶段>_model.onnx`，bin 就是 `<前缀>.bin`。"""
+    ws, _lines = _compiled(tmp_path)
+    names = sorted(p.name for p in ws.output_dir.iterdir())
+    assert names == [
+        "0708.bin",
+        "0708_calibrated_model.onnx",
+        "0708_optimized_float_model.onnx",
+        "0708_original_float_model.onnx",
+        "0708_quantized_model.onnx",
+    ]
+
+
+def test_mock_bin_has_no_march_or_shape_suffix(tmp_path: Path):
+    """原先写的是 `model_bayes-e_640x640_nv12.bin` —— 那是编的。"""
+    ws, _lines = _compiled(tmp_path)
+    binary = ws.output_dir / "0708.bin"
+    assert binary.is_file()
+    assert not list(ws.output_dir.glob("*_640x640_nv12.bin"))
+
+
+def test_mock_console_uses_the_real_success_marker(tmp_path: Path):
+    """原先写的是 `[SUCCESS] 转换完成` —— 真工具打的是这个（都是 INFO 级）。"""
+    from rdkquant.core.conversion import END_LINE, SUCCESS_LINE
+
+    _ws, lines = _compiled(tmp_path)
+    text = "\n".join(lines)
+    assert SUCCESS_LINE in text
+    assert END_LINE in text
+    assert "[SUCCESS]" not in text
+
+
+def test_mock_writes_the_log_file_that_s4_parses(tmp_path: Path):
+    """**没有这个文件，S4 的解析路径在 mock 下走的是"日志读不到"那条分支。**"""
+    from rdkquant.core.conversion import (
+        MAKERTBIN_LOG_NAME, evaluate_conversion, parse_makertbin, read_log,
+        discover_artifacts, ConversionSpec,
+    )
+
+    ws, _lines = _compiled(tmp_path)
+    log = ws.root / MAKERTBIN_LOG_NAME
+    assert log.is_file()
+
+    report = parse_makertbin(read_log(log))
+    assert report.succeeded is True
+    assert report.saw_node_table is True
+    assert len(report.nodes) == 4
+
+    verdict = evaluate_conversion(
+        report, discover_artifacts(ws.output_dir),
+        spec=ConversionSpec(
+            onnx_model="./model/x.onnx", output_prefix="0708", march="bayes-e",
+            input_name="images", input_shape="1x3x640x640",
+            input_type_train="rgb", input_layout_train="NCHW",
+            calibration_type="skip", cal_data_dir="./calib_bin_f32",
+        ),
+        returncode=0,
+    )
+    assert verdict.ok, verdict.checks
+
+
+def test_mock_log_table_has_the_two_word_header(tmp_path: Path):
+    """假日志的表头也要是**两个词一列**，否则 mock 路径测不出列错位那个 bug。"""
+    from rdkquant.core.conversion import (
+        MAKERTBIN_LOG_NAME, parse_makertbin, read_log,
+    )
+
+    ws, _lines = _compiled(tmp_path)
+    report = parse_makertbin(read_log(ws.root / MAKERTBIN_LOG_NAME))
+    assert report.nodes[0].threshold == "1.0", "错位时这里会是 int8"
+    assert report.nodes[0].cosine == "--"
+
+
+def test_mock_compile_falls_back_when_config_is_missing(tmp_path: Path):
+    """没有 config.yaml 时用官方默认前缀 `model`，不能崩。"""
+    ws = B.Workspace(tmp_path / "run").ensure()
+    backend = B.MockBackend(workspace=ws, delay=0.0)
+    assert backend.compile(on_line=lambda _l: None) == 0
+    assert (ws.output_dir / "model.bin").is_file()
+
+
+def test_mock_compile_honours_cancellation(tmp_path: Path):
+    import threading
+
+    ws = B.Workspace(tmp_path / "run").ensure()
+    backend = B.MockBackend(workspace=ws, delay=0.0)
+    cancel = threading.Event()
+    cancel.set()
+    rc = backend.compile(on_line=lambda _l: None, cancel=cancel)
+    assert rc != 0
+    assert not (ws.output_dir / "model.bin").exists(), "取消时不该写产物"
+
+
+# --------------------------------------------------------------------------
 # 路径转换
 # --------------------------------------------------------------------------
 def test_container_paths_are_workspace_relative():

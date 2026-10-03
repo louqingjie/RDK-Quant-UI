@@ -123,16 +123,20 @@ S4 的错误分类要把这类认出来，而不是把原文甩给用户。
 **对「余弦相似度表」这项校验的含义**：表存在 ≠ 有数值。`skip` 模式下这项**应当
 只校验「表被解析到了」**，不要因为全是 `--` 判失败 —— 那是`skip` 的正常结果。
 
-## Mock 与现实的三处偏差
+## Mock 已经和实测对齐
 
-`core/backends.py` 的 `MockBackend` / `_MOCK_COMPILE` 有三处和实测不符，
-M4 要一起修：
+`core/backends.py` 的 `MockBackend` 原先有三处和实测不符，**M4 已修**，
+`tests/test_backends.py` 里有契约测试守着：
 
-| | Mock 现在 | 实测 |
+| | 原先（编的） | 现在（实测） |
 |---|---|---|
 | 成功字样 | `[SUCCESS] 转换完成` | `Convert to runtime bin file successfully!` |
-| 产物 | 只写 `.bin` | 5 个产物都写 |
+| 产物 | 只写 `.bin` | 5 个都写 |
 | bin 名字 | `{stem}_{tag}_640x640_nv12.bin` | `{prefix}.bin` |
+
+另外 Mock 现在**会写 `hb_mapper_makertbin.log`**。这一条比上面三条更要紧：
+没有它，S4 的解析路径在 mock 下走的是"日志读不到"那条分支，**等于没测**。
+假日志的节点表也照抄了"跨词表头"的形状，否则列错位那个 bug 在 mock 下复现不出来。
 
 ## 怎么复现这些测量
 

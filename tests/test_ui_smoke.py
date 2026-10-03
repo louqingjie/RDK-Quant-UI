@@ -650,6 +650,26 @@ def _wait_for(predicate, qapp, *, timeout: float = 5.0, delay: float = 0.02) -> 
     return False
 
 
+def _arm_remote_probe(page, qapp) -> None:
+    """把环境页带回「环境刚就绪、还没自动探测过」的状态。
+
+    涉及远程体积探测的用例**都要先调这个**，两步都不能省：
+
+    1. **等构造期那次自动探测收尾。** `_auto_probe_remote` 自己的守卫里就有
+       `self.tasks.busy`，所以不等它，测试换上的桩可能和飞行中那次交叉。
+    2. **复位 `_remote_probed`。** 那是"每个会话只自动问一次"的开关，
+       外壳构造时就用掉了；不复位的话 `refresh_report()` 里那次探测直接
+       return，**一次都不发**。
+
+    ⚠️ **这个助手不解决"等了个部分结果"那类 flaky。** 那是另一个独立成因，
+    实测更常见（Linux 六遍红两遍），修法见下面用例里对
+    `len(page._remote_sizes) == len(page.specs)` 的注释 —— 探测是**逐个**
+    填的，等 `bool(...)` 会在第一个结果到达时就往下走。
+    """
+    assert _wait_for(lambda: not page.tasks.busy, qapp), "构造期的自动探测没收尾"
+    page._remote_probed = False
+
+
 def test_auto_probes_remote_sizes_when_docker_is_ready(shell, qapp, monkeypatch):
     """环境就绪时会**自动**问一次真实体积。
 
@@ -671,10 +691,15 @@ def test_auto_probes_remote_sizes_when_docker_is_ready(shell, qapp, monkeypatch)
     monkeypatch.setattr(env_mod.img, "probe_remote", fake_probe)
 
     page = shell.env_page
-    page._remote_probed = False            # 模拟"环境刚就绪"
+    _arm_remote_probe(page, qapp)          # 模拟"环境刚就绪"
     page.refresh_report()
 
-    assert _wait_for(lambda: bool(page._remote_sizes), qapp), "后台探测没回来"
+    # ⚠️ 等的是**全部**镜像都有结果，不是"有结果就行"。
+    # `_remote_sizes` 是**逐个**填的（每张一个信号），而这条用例下一步要断言
+    # `len(calls) == len(specs)` —— 等 `bool(...)` 的话第一个回来就满足了，
+    # 断言时 `calls` 里可能只有 1~3 个，**随机红**（实测 Linux 六遍红两遍）。
+    assert _wait_for(lambda: len(page._remote_sizes) == len(page.specs), qapp), \
+        "后台探测没回来"
     assert len(calls) == len(page.specs), "每个镜像都该问一次"
     assert set(page._remote_sizes) == {s.id for s in page.specs}
     # 详情行要跟着更新成真实体积，而不是清单里的估算值
@@ -702,22 +727,13 @@ def test_refresh_report_does_not_wipe_probed_sizes(shell, qapp, monkeypatch):
 
     page = shell.env_page
 
-    # ⚠️ 下面两道前置缺一不可，少一个这条用例就会**时红时绿**。
+    # ⚠️ 两道前置缺一不可，少一个这条用例就**时红时绿** —— 见 `_arm_remote_probe`
+    # 的说明（为什么必须等构造期收尾、为什么必须复位那个一次性开关）。
     #
-    # 1) **等构造期那次自动探测收尾。** `_auto_probe_remote()` 会起一个后台线程
-    #    逐张调 `probe_remote`，而打桩是**调用时**才查的。不等的话测试可能在它
-    #    跑到一半时把桩换成"成功"，于是拿到 0~4 个不等的体积 ——
-    #    断言 `== len(specs)` 就随机红绿（实测：全量下红过两次，
-    #    单独跑又绿，一度被当成"抖动"放过去了）。
-    #
-    # 2) **复位 `_remote_probed`。** 那是"每个会话只自动问一次"的开关，而外壳
-    #    **构造时**就用掉了它（用的还是 fixture 里那个**失败**的桩）。
-    #    不复位的话 `refresh_report()` 里的 `_auto_probe_remote()` 在第 632 行
-    #    直接 return，**一次探测都不会发** —— 有诊断记录：
-    #        换成功桩后再调 refresh_report()：probe_remote 新增调用 0 次
-    #        复位开关后再调：               probe_remote 新增调用 4 次
-    assert _wait_for(lambda: not page.tasks.busy, qapp), "构造期的自动探测没收尾"
-    page._remote_probed = False
+    # 这里原来把两道写成内联的两行，只在这一条用例里做了；其余三条同样依赖
+    # 远程探测的用例漏了，于是同一个竞态在它们身上继续存在（实测 Linux 全量
+    # 四遍红一遍，红的正是那两条）。现在统一走助手。
+    _arm_remote_probe(page, qapp)
 
     page.refresh_report()
 
@@ -742,8 +758,13 @@ def test_probed_size_reaches_the_detail_line(shell, qapp, monkeypatch):
     )
 
     page = shell.env_page
+    # 不复位的话，构造期那次用**失败桩**做的探测已经把开关用掉了 ——
+    # `refresh_report()` 一次都不发，`_remote_sizes` 要么空、要么是构造期的
+    # 结果，下面那条 1.40 GB 的断言就会随机红。
+    _arm_remote_probe(page, qapp)
     page.refresh_report()
-    assert _wait_for(lambda: bool(page._remote_sizes), qapp)
+    # 同理等**全部**：只等 `bool(...)` 的话，第 0 张还没探到就往下走了
+    assert _wait_for(lambda: len(page._remote_sizes) == len(page.specs), qapp)
 
     # 本机一个镜像都没导入（fixture 把 local_images 桩成空）→ **故意不选中**
     assert page.selected_spec() is None, "没有可用的镜像时不该替用户猜一个"
@@ -807,7 +828,7 @@ def test_auto_probe_is_skipped_when_docker_is_down(shell, qapp, monkeypatch):
     )
 
     page = shell.env_page
-    page._remote_probed = False
+    _arm_remote_probe(page, qapp)
     page.refresh_report()                  # fixture 的 report 里 daemon_ok=False
     qapp.processEvents()
 
@@ -834,7 +855,7 @@ def test_auto_probe_only_asks_for_missing_images(shell, qapp, monkeypatch):
     )
 
     page.refresh_local()
-    page._remote_probed = False
+    _arm_remote_probe(page, qapp)
     page.refresh_report()
     assert _wait_for(lambda: bool(calls), qapp)
 

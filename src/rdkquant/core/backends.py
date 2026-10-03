@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from typing import Protocol, Sequence
 from . import containerops
 from .calib import CalibBuildSpec
 from .containerops import ProgressCallback
+from .conversion import END_LINE, MAKERTBIN_LOG_NAME, SUCCESS_LINE
 from .proc import LineCallback, which
 from .runner import ContainerRunner, Mount
 
@@ -270,19 +272,53 @@ Output
 2026-01-01 00:00:00,021 INFO End model checking....
 """
 
+#: 假 makertbin 的控制台输出。
+#:
+#: **成功字样照真样本**（实测自 X5 CPU 容器）：`Convert to runtime bin file
+#: successfully!` + `End Model Convert`，都是 INFO 级。原先这里写的是
+#: `[SUCCESS] 转换完成` —— 那是编的，和现实不符。
 _MOCK_COMPILE = """\
 [INFO] hb_mapper makertbin 开始
 [INFO] 读取配置 {config}
 [INFO] input_name = images, input_shape = 1x3x640x640
 [INFO] input_type_rt = nv12  ->  将自动插入 YUV->RGB 转换节点
-[INFO] calibration_parameters.cal_data_dir = ./cal_images （检测到 {n_cal} 张图片）
+[INFO] calibration_parameters.cal_data_dir = {cal_dir} （检测到 {n_cal} 张图片）
 [INFO] 校准中 ... {n_cal}/{n_cal} samples
 [INFO] 量化中 ... 生成 int8 模型
 [INFO] 编译中 ... optimize_level = O3, compile_mode = latency
-[SUCCESS] 转换完成
-[SUCCESS] 输出: {stem}_{tag}_640x640_nv12.bin
-[INFO] 建议下一步: hrt_model_exec perf --model_file {stem}_{tag}_640x640_nv12.bin --thread_num 1
+[INFO] {success}
+[INFO] {end}
+[INFO] 建议下一步: hrt_model_exec perf --model_file {bin_name} --thread_num 1
 """
+
+#: 假日志里的节点表。**表头照真样本**：`Cosine Similarity` 是**两个词一列**，
+#: 数据行因此比表头少一格 —— 这正是 `logparse` 里 `_merge_multiword` 要处理的事，
+#: 假数据也照抄，否则 mock 路径测不出那个 bug。
+_MOCK_MAKERTBIN_TABLE = """\
+Node        ON   Subgraph  Type              Cosine Similarity  Threshold  DataType  
+-----------------------------------------------------------------------------------------
+Conv_0      BPU  id(0)     HzSQuantizedConv  --                 1.0        int8      
+Conv_2      BPU  id(0)     HzSQuantizedConv  --                 1.0        int8      
+Softmax_91  CPU  id(0)     Softmax           --                 1.0        int8      
+Resize_118  CPU  id(1)     Resize            --                 127.0      int8      
+"""
+
+#: 假产物的内容。**不写真实体积**（几 MB × 5 会让每个测试都慢），
+#: 只要求非 0 —— `discover_artifacts` 把 0 字节当半成品排除掉。
+_MOCK_ARTIFACT_BYTES = b"MOCK-ONNX" + b"\x00" * 4096
+_MOCK_BIN_BYTES = b"MOCK-BIN" + b"\x00" * 2048
+
+#: 产物阶段名 → 文件名后缀。顺序与 `CONVERSION_ARTIFACTS` 的四个 onnx 模式一致。
+_MOCK_STAGES = (
+    "original_float_model",
+    "optimized_float_model",
+    "calibrated_model",
+    "quantized_model",
+)
+
+#: 从 config.yaml 里读前缀。**只给 mock 用**的捷径：我们自己的 `render_config`
+#: 一律写单引号，所以这个正则够用；解析失败的场景不需要支持。
+_MOCK_PREFIX_RE = re.compile(r"^\s*output_model_file_prefix:\s*'((?:[^']|'')*)'", re.M)
 
 
 # --------------------------------------------------------------------------
@@ -393,22 +429,93 @@ class MockBackend:
         return self._emit(_MOCK_CHECK.format(march=march or self.march), on_line, cancel)
 
     def compile(self, config_path: Path | None = None, *, on_line: LineCallback, cancel=None) -> int:
+        """假转换。**照真样本写**（见 docs/design/makertbin-runtime.md）。
+
+        原先有三处和实测不符，都会让 mock 路径测不出真问题：
+
+        * 成功字样是 `Convert to runtime bin file successfully!` / `End Model Convert`，
+          不是 `[SUCCESS] 转换完成`
+        * 产物有 **5 个**（四个 onnx + 一个 bin），不只写 `.bin`
+        * bin 的名字就是 `<prefix>.bin`，没有 march / 尺寸 / nv12 后缀
+
+        另外还写一份 `hb_mapper_makertbin.log`。**没有它的话，S4 的解析路径在
+        mock 下走的是"日志读不到"那条分支** —— 那等于没测。
+        """
         self.workspace.ensure()
-        cfg = config_path or self.workspace.config_path
-        n_cal = len(list(self.workspace.calib_dir.glob("*"))) if self.workspace.calib_dir.exists() else 48
-        tag = "bayes-e" if self.march == "bayes-e" else "bernoulli2"
-        stem = "model"
-        on_line(f"$ (mock) hb_mapper makertbin --config {cfg.name}")
+        cfg = Path(config_path) if config_path else self.workspace.config_path
+        prefix = self._config_prefix(cfg)
+        cal_dir = f"./{self.workspace.calib_dir.name}"
+        n_cal = (len(list(self.workspace.calib_dir.iterdir()))
+                 if self.workspace.calib_dir.is_dir() else 48)
+
+        on_line(f"$ (mock) hb_mapper makertbin --config {cfg.name} --model-type onnx")
         rc = self._emit(
-            _MOCK_COMPILE.format(config=cfg.name, n_cal=n_cal, stem=stem, tag=tag),
+            _MOCK_COMPILE.format(
+                config=cfg.name, n_cal=n_cal, cal_dir=cal_dir,
+                bin_name=f"{prefix}.bin",
+                success=SUCCESS_LINE, end=END_LINE,
+            ),
             on_line,
             cancel,
         )
-        if rc == 0:
-            out = self.workspace.output_dir / f"{stem}_{tag}_640x640_nv12.bin"
-            out.write_bytes(b"MOCK-BIN" + b"\x00" * 1024)
-            on_line(f"[mock] 已写出假产物 {out}")
-        return rc
+        if rc != 0:
+            return rc
+
+        self._write_makertbin_log(prefix, n_cal)
+        written = self._write_artifacts(prefix)
+        on_line(f"[mock] 已写出 {len(written)} 个假产物到 {self.workspace.output_dir.name}/")
+        return 0
+
+    # ------------------------------------------------------------------
+    def _config_prefix(self, cfg: Path) -> str:
+        """从 config.yaml 里取产物前缀；读不到就用 `model`（官方默认值）。"""
+        try:
+            text = cfg.read_text(encoding="utf-8")
+        except OSError:
+            return "model"
+        match = _MOCK_PREFIX_RE.search(text)
+        if not match:
+            return "model"
+        return match.group(1).replace("''", "'") or "model"
+
+    def _write_makertbin_log(self, prefix: str, n_cal: int) -> Path:
+        """写工作区里的 makertbin 日志。
+
+        **格式照真样本**：普通行带 `file: x.py func: y line No: N` 前缀，
+        节点表是**原样**的多行块（没有前缀）。
+        """
+        def entry(second: str, lineno: int, message: str) -> str:
+            return (f"2026-01-01 00:00:{second},000 file: hb_mapper_makertbin.py "
+                    f"func: hb_mapper_makertbin line No: {lineno} {message}")
+
+        lines = [
+            entry("00", 100, f"log will be stored in /workspace/{MAKERTBIN_LOG_NAME}"),
+            entry("10", 200, f"calibration_parameters.cal_data_dir = "
+                             f"./{self.workspace.calib_dir.name} （检测到 {n_cal} 张图片）"),
+            entry("20", 700, "The main quantized node information:"),
+            *_MOCK_MAKERTBIN_TABLE.splitlines(),
+            entry("30", 4310,
+                  "input-source        : {'images': 'pyramid', '_default_value': 'ddr'}"),
+            entry("44", 783, SUCCESS_LINE),
+            entry("45", 784, END_LINE),
+        ]
+        target = self.workspace.root / MAKERTBIN_LOG_NAME
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return target
+
+    def _write_artifacts(self, prefix: str) -> list[Path]:
+        """五个产物都写出来 —— 只写 `.bin` 的话「5 个产出物」那项永远是 False。"""
+        out = self.workspace.output_dir
+        out.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        for stage in _MOCK_STAGES:
+            path = out / f"{prefix}_{stage}.onnx"
+            path.write_bytes(_MOCK_ARTIFACT_BYTES)
+            written.append(path)
+        binary = out / f"{prefix}.bin"
+        binary.write_bytes(_MOCK_BIN_BYTES)
+        written.append(binary)
+        return written
 
     def version(self) -> str:
         return "mock"
