@@ -32,17 +32,17 @@ RDK 模型量化工具：把地平线 RDK X5 / X3 的模型量化流程（官方
 | 形状字符串用 **ASCII `x`** | 全角 `×` 会让探针的形状解析静默返回 `None`，于是字节数校验被悄悄跳过 |
 | 容器内路径只能来自工作区 | 容器只挂载工作区。工作区**外**的目录必须先复制进来（模型、校准图片都是这么做的） |
 
-### 已知的 Qt 陷阱（都真实踩过，别再踩）
+### 已知的 Qt 陷阱
 
-- **`processEvents()` 不处理 `DeferredDelete`**。`deleteLater()` 只是排队，
-  不投递就永远不销毁——测试里表现为控件累积、`apply_theme` 越来越慢（实测慢 14 倍）。
-  需要 `QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)`。
-- **`QListView` 在 IconMode 下只读模型的第 0 列**。用 `setItem(row, col)` 铺多列，
-  只有每行第一个会显示出来。
-- **`make_table(headers)` 收的是表头列表，不是 model**。传错不会抛异常，
-  只会得到一张**全 0 宽的空表**。
-- 信号连接要小心**立即求值**：`self.grid.invert_checked` 放进 tuple 会在构造期就取值。
-- 构造期控件就会发 `valueChanged`，回调里碰还没创建的控件会 `AttributeError`。
+改 `src/rdkquant/ui/` 前先看 [`docs/qt-traps.md`](docs/qt-traps.md)。五条，都真实踩过：
+
+1. `processEvents()` 不处理 `DeferredDelete` → 控件从不销毁（曾让整个套件慢 14 倍）
+2. `QListView` 的 IconMode 只读模型的第 0 列 → 只显示每行第一个
+3. `make_table(headers)` 收的是表头列表，不是 model → 传错得到全 0 宽空表
+4. 信号连接会被**立即求值** → 构造期 `AttributeError`
+5. 构造期控件就发 `valueChanged` → 回调里碰还没创建的控件
+
+**后三条出错时没有异常**，只是"看起来不对"。所以改完 UI 要**看渲染结果**，不能只看"没报错"。
 
 ### 文件操作
 
@@ -58,43 +58,19 @@ RDK 模型量化工具：把地平线 RDK X5 / X3 的模型量化流程（官方
 
 **完成一项改动就提交，不要攒着，也不要问。** 一个提交只做一件事。
 
-提交信息用**中文**，格式：
-
-```
-<一句话说清修了什么>
-
-<现象／用户报告的原话>
-
-## 根因
-<为什么坏。要具体到机制，不要写"逻辑错误">
-
-## 取舍
-问题：
-选择：
-替代方案与代价：
-
-## 验证
-<实测数字。命令 + 结果>
-```
-
-**必须用 `-F` 传文件，不能用 `-m`**：
+提交信息用**中文**，四段：现象 → 根因 → 取舍 → 验证。
 
 ```powershell
 git add -A
 git -c core.autocrlf=false commit -q -F "$env:TEMP\msg.txt"
 ```
 
-多行中文信息用 `-m` 会被 PowerShell 拆散（`——` 之类的字符会触发参数分割，
-实测报 `pathspec ... did not match any file(s) known to git`）。先把信息写进
-临时文件（编辑工具写，保证 UTF-8），提交完删掉。
+**必须 `-F` 传文件，不能用 `-m`** —— 多行中文会被 PowerShell 拆散（`——` 之类的
+字符触发参数分割，实测报 `pathspec ... did not match any file(s) known to git`）。
+`core.autocrlf=false` 也必须带：仓库里有 `.cmd` 和 shell 脚本，换行被改写会坏。
 
-`core.autocrlf=false` 必须带：仓库里有 `.cmd` 和 shell 脚本，换行符被改写会坏。
-
-提交完确认工作区干净：
-
-```powershell
-git status --short    # 应当无输出
-```
+完整模板、逐段说明和「为什么不用 `-m`」见 [`docs/commit-format.md`](docs/commit-format.md)。
+提交完 `git status --short` 应当无输出。
 
 ---
 
@@ -162,10 +138,8 @@ wsl -e bash -lc "cd /mnt/c/Users/ccron/Desktop/RDK-Quantization-UI && bash ./scr
 ### 特别检查"文档写的和代码相反"
 
 这比缺文档危险：缺文档只是没人看，**写反的文档会把人引向错误的修改**。
-本项目发生过一次（`CONTAINER_FINDINGS` 说必须传 `--user`，代码刻意不传），
-完整经过见 [`docs/AGENTS.md`](docs/AGENTS.md#文档和代码相反)。
-
 处置原则一句话：**先假设代码是对的**（它经过实测），去改文档。
+本项目发生过一次，完整经过和理由见 [`docs/AGENTS.md`](docs/AGENTS.md#文档和代码相反)。
 
 ---
 
