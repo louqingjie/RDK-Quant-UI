@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -43,8 +44,6 @@ from ..widgets import (
     make_table,
 )
 from ..workers import TaskRunner
-
-IMAGE_HEADERS = ["ID", "板型", "架构", "变体", "离线包", "导入后预计占用", "本机", "说明"]
 
 _LEVEL_TEXT = {LEVEL_OK: "通过", LEVEL_WARN: "警告", LEVEL_ERROR: "错误"}
 
@@ -91,9 +90,11 @@ class EnvPage(QWidget):
         self.specs = img.load_manifest()
         self.local: list[str] = []
         self.report: HostReport | None = None
-        # 选中态必须自己记住：刷新镜像表会 reset model，Qt 会把选中行清掉。
-        # 不恢复的话，用户点一下行就"失去选择"，按钮随即报"请先选一行"。
+        # 选中态必须自己记住：刷新镜像列表会 clear() 下拉栏，Qt 会把当前项丢掉。
+        # 不恢复的话，用户选完再看一眼别的页面回来，"选择"就没了。
         self._selected_id: str | None = None
+        #: 查询到的远程体积（覆盖清单里的 size_hint_bytes）。详情行要用它。
+        self._remote_sizes: dict[str, int] = {}
         self._updating = False
         self._findings: list = []
 
@@ -193,14 +194,39 @@ class EnvPage(QWidget):
             "支持断点续传，中断后可继续。"
         )
 
-        self.image_model = TableModel(IMAGE_HEADERS)
-        self.image_view = make_table(IMAGE_HEADERS)
-        self.image_view.setModel(self.image_model)
-        # 必须在 setModel 之后：列宽模式依赖 model 的列数
-        fit_columns_to_content(self.image_view)
-        self.image_view.selectionModel().selectionChanged.connect(self._on_image_selected)
-        # 高度同样交给 fit_table_height()（4 个镜像要能一眼看全）
-        card.add(self.image_view)
+        # ── 选择：下拉栏 ──
+        #
+        # 这里原来是一张 8 列表格（ID/板型/架构/变体/离线包/导入后预计占用/本机/说明）。
+        # 问题不是信息不够，是**它看着像数据表，不像选择器**：用户在这一步要做的事
+        # 只有"选一个镜像"，却得先在表里点一行，而选中态只有一行淡淡的高亮；
+        # 首次进入时更是**什么都没选中**，看不出默认会用哪个。
+        #
+        # 改成下拉栏后：选项文字直接带状态（已导入 / 需下载 1.7 GB），
+        # 选中项完整信息跟在下面。表格那 8 列一条信息都没丢，只是换了位置。
+        holder = QWidget()
+        box = QVBoxLayout(holder)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(m.space_1)
+        picker_label = QLabel("工具链镜像")
+        picker_label.setObjectName("Muted")
+        box.addWidget(picker_label)
+
+        self.image_box = QComboBox()
+        self.image_box.setToolTip("选一个工具链镜像。括号里是它对应的芯片架构和本机状态。")
+        self.image_box.currentIndexChanged.connect(self._on_image_selected)
+        box.addWidget(self.image_box)
+        card.add(holder)
+
+        # 选中项的完整信息：原来摊在表格里的那几列，现在跟着选择走
+        self.image_detail = QLabel("—")
+        self.image_detail.setObjectName("Muted")
+        self.image_detail.setWordWrap(True)
+        card.add(self.image_detail)
+
+        self.image_note = QLabel("")
+        self.image_note.setObjectName("Muted")
+        self.image_note.setWordWrap(True)
+        card.add(self.image_note)
 
         row = QHBoxLayout()
         row.setSpacing(m.space_2)
@@ -236,10 +262,11 @@ class EnvPage(QWidget):
         return spec if spec is not None else self.specs[0]
 
     def selected_spec(self) -> img.ImageSpec | None:
-        rows = self.image_view.selectionModel().selectedRows()
-        if not rows:
+        """当前下拉栏选中的镜像。下拉栏始终有选中项，所以正常不会返回 None。"""
+        index = self.image_box.currentIndex()
+        if index < 0 or index >= len(self.specs):
             return None
-        return self.specs[rows[0].row()]
+        return self.specs[index]
 
     def refresh_local(self) -> None:
         self.local = img.local_images()
@@ -326,52 +353,83 @@ class EnvPage(QWidget):
             self.tile_ram.set_value(f"{report.ram.total_bytes / GB:.1f}", "GB")
 
     # ------------------------------------------------------------------
-    # 镜像表
+    # 镜像下拉栏
     # ------------------------------------------------------------------
-    def _image_rows(self, remote_sizes: dict[str, int] | None = None):
-        colors = semantic_colors(self.palette())
-        rows, cell_colors = [], {}
-        for i, spec in enumerate(self.specs):
-            size = (remote_sizes or {}).get(spec.id) or spec.size_hint_bytes
-            present = img.find_loaded(spec.image_ref_hint, self.local)
+    def _combo_text(self, spec: img.ImageSpec, present: str | None, size: int | None) -> str:
+        """下拉栏里的一行。
+
+        **决定选择的信息必须在选项文字里**（本机有没有、要下多少）——
+        藏到下面的详情里就还得点一遍才知道哪个已经装好了。
+        """
+        if present:
+            return f"{spec.display_name}　·　已导入"
+        if size:
+            return f"{spec.display_name}　·　需下载 {img.human_bytes(size)}"
+        # 清单里 X3 两个镜像没有体积（官方没给），别写成"需下载 （体积未知）"那种半截话
+        return f"{spec.display_name}　·　需下载（体积未知，可先查询）"
+
+    @staticmethod
+    def _detail_text(spec: img.ImageSpec, present: str | None, size: int | None) -> str:
+        """选中项的完整信息 —— 原来摊在表格里的那几列。"""
+        parts = [
+            f"架构 {spec.march}",
+            f"Python {spec.python}" if spec.python else "",
+        ]
+        if size:
             # 解压后的镜像层通常是压缩包的 2~2.5 倍，这个数字直接决定磁盘够不够
-            footprint = img.human_bytes(int(size * 2.2)) if size else "未知"
-            rows.append(
-                [
-                    spec.id,
-                    spec.board,
-                    spec.march,
-                    spec.variant,
-                    img.human_bytes(size) if size else "未知",
-                    footprint,
-                    present or "—",
-                    spec.note,
-                ]
-            )
-            if present:
-                cell_colors[(i, 6)] = colors["success"]
-        return rows, cell_colors
+            parts.append(f"离线包 {img.human_bytes(size)}")
+            parts.append(f"导入后约 {img.human_bytes(int(size * 2.2))}")
+        else:
+            # 体积未知时**只说一次**，别写成"离线包 未知 · 导入后约 未知"
+            parts.append("离线包体积未知（可点「查询远程体积」）")
+        parts.append(f"本机：{present}" if present else "本机：未导入")
+        return "　·　".join(p for p in parts if p)
+
+    def _update_image_detail(self) -> None:
+        spec = self.selected_spec()
+        if spec is None:
+            self.image_detail.setText("—")
+            self.image_note.setText("")
+            return
+        size = self._remote_sizes.get(spec.id) or spec.size_hint_bytes
+        present = img.find_loaded(spec.image_ref_hint, self.local)
+        self.image_detail.setText(self._detail_text(spec, present, size))
+        self.image_note.setText(spec.note)
 
     def refresh_images(self, remote_sizes: dict[str, int] | None = None) -> None:
-        rows, colors = self._image_rows(remote_sizes)
-        self._updating = True
+        self._remote_sizes = dict(remote_sizes or {})
+        self._updating = True                 # 重建选项期间不发信号，否则会连环触发体检
         try:
-            self.image_model.set_rows(rows, colors)
-            fit_table_height(self.image_view, self.image_model, min_rows=4)
+            self.image_box.clear()
+            for spec in self.specs:
+                size = self._remote_sizes.get(spec.id) or spec.size_hint_bytes
+                present = img.find_loaded(spec.image_ref_hint, self.local)
+                self.image_box.addItem(self._combo_text(spec, present, size))
+                self.image_box.setItemData(
+                    self.image_box.count() - 1,
+                    self._detail_text(spec, present, size) + (f"\n{spec.note}" if spec.note else ""),
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            # 恢复上次的选择；首次进入就是第 0 项（**有明确的默认值**，
+            # 而不是像表格那样首屏什么都不选）
+            index = 0
             if self._selected_id:
                 for i, spec in enumerate(self.specs):
                     if spec.id == self._selected_id:
-                        self.image_view.selectRow(i)
+                        index = i
                         break
+            self.image_box.setCurrentIndex(index)
         finally:
             self._updating = False
+        self._update_image_detail()
 
-    def _on_image_selected(self, *_args) -> None:
+    def _on_image_selected(self, _index: int = -1) -> None:
         if self._updating:
             return
         spec = self.selected_spec()
         if spec:
             self._selected_id = spec.id
+            self._update_image_detail()
             self.refresh_report(required=spec)
             self.log.append_line(
                 f"[选择] {spec.display_name} → march={spec.march}"
@@ -423,7 +481,8 @@ class EnvPage(QWidget):
     def _on_fetch(self) -> None:
         spec = self.selected_spec()
         if spec is None:
-            self.log.append_line("[提示] 请先在镜像列表里选一行。")
+            # 下拉栏始终有选中项，走到这里说明镜像清单是空的（打包或数据文件出问题）
+            self.log.append_line("[提示] 镜像清单为空，无法确定要下载哪个。")
             return
         if self.tasks.busy:
             self.log.append_line("[提示] 已有任务在跑，请先等待或取消。")
