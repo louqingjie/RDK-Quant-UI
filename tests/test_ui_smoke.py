@@ -643,6 +643,24 @@ def test_refresh_report_does_not_wipe_probed_sizes(shell, qapp, monkeypatch):
     )
 
     page = shell.env_page
+
+    # ⚠️ 下面两道前置缺一不可，少一个这条用例就会**时红时绿**。
+    #
+    # 1) **等构造期那次自动探测收尾。** `_auto_probe_remote()` 会起一个后台线程
+    #    逐张调 `probe_remote`，而打桩是**调用时**才查的。不等的话测试可能在它
+    #    跑到一半时把桩换成"成功"，于是拿到 0~4 个不等的体积 ——
+    #    断言 `== len(specs)` 就随机红绿（实测：全量下红过两次，
+    #    单独跑又绿，一度被当成"抖动"放过去了）。
+    #
+    # 2) **复位 `_remote_probed`。** 那是"每个会话只自动问一次"的开关，而外壳
+    #    **构造时**就用掉了它（用的还是 fixture 里那个**失败**的桩）。
+    #    不复位的话 `refresh_report()` 里的 `_auto_probe_remote()` 在第 632 行
+    #    直接 return，**一次探测都不会发** —— 有诊断记录：
+    #        换成功桩后再调 refresh_report()：probe_remote 新增调用 0 次
+    #        复位开关后再调：               probe_remote 新增调用 4 次
+    assert _wait_for(lambda: not page.tasks.busy, qapp), "构造期的自动探测没收尾"
+    page._remote_probed = False
+
     page.refresh_report()
 
     assert _wait_for(lambda: len(page._remote_sizes) == len(page.specs), qapp), \
