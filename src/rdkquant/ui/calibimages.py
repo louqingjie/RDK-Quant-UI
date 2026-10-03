@@ -94,6 +94,59 @@ def read_size(path: Path) -> tuple[int, int] | None:
     return None
 
 
+@dataclass(frozen=True)
+class Exposure:
+    """一张图的曝光情况。0~1 的占比 + 0~255 的平均亮度。"""
+
+    mean: float
+    near_black: float
+    near_white: float
+
+    @property
+    def is_bad(self) -> bool:
+        """该不该建议排除。
+
+        官方要求排除过曝 / 欠曝。判据刻意**宽松**：宁可漏掉边缘样本，
+        也不要误伤正常图 —— 一次误排除会悄悄縮小校准集，而用户看不出来。
+        """
+        return self.near_black > 0.5 or self.near_white > 0.5 or self.mean < 12 or self.mean > 243
+
+
+#: 亮度判据（0~255）
+_NEAR_BLACK_LUMA = 16
+_NEAR_WHITE_LUMA = 240
+
+
+def measure_exposure(image: QImage) -> Exposure:
+    """算一张图的曝光。**输入是已经解码好的 QImage** —— 不要再解一次。
+
+    为什么用缩略图而不是原图：像素已经为了预览解码了，顺手遍历一遍几乎免费。
+    缺点是只覆盖**预览集**（50~200 张）而不是全量 3504 —— 但那恰好是用户
+    正在挑的那批。全量逐张算就得解码 3504 张，把刚拿到的 32 倍又还回去。
+    """
+    small = image.convertToFormat(QImage.Format.Format_RGB888)
+    width, height = small.width(), small.height()
+    if width <= 0 or height <= 0:
+        return Exposure(0.0, 0.0, 0.0)
+
+    stride = small.bytesPerLine()
+    raw = bytes(small.constBits())
+    count = width * height
+    total = near_black = near_white = 0
+    for y in range(height):
+        row = y * stride
+        for x in range(width):
+            at = row + x * 3
+            # ITU-R BT.601 亮度
+            luma = (raw[at] * 299 + raw[at + 1] * 587 + raw[at + 2] * 114) // 1000
+            total += luma
+            if luma < _NEAR_BLACK_LUMA:
+                near_black += 1
+            elif luma > _NEAR_WHITE_LUMA:
+                near_white += 1
+    return Exposure(total / count, near_black / count, near_white / count)
+
+
 @dataclass
 class ThumbnailResult:
     generated: int = 0
@@ -101,6 +154,8 @@ class ThumbnailResult:
     files: list[str] = field(default_factory=list)
     #: 读不出来的文件（格式不支持或文件损坏）
     unreadable: list[str] = field(default_factory=list)
+    #: 文件名 → 曝光。**只覆盖本次生成的那些**（复用已解码的像素，不额外解码）
+    exposure: dict[str, Exposure] = field(default_factory=dict)
 
 
 def build_thumbnails(
@@ -144,6 +199,8 @@ def build_thumbnails(
             )
         else:
             thumb = image
+        # 顺手算曝光：像素已经解码了，这一步几乎免费
+        result.exposure[path.name] = measure_exposure(thumb)
         target = out_dir / f"{path.stem}.png"
         if thumb.save(str(target), "PNG"):
             result.generated += 1

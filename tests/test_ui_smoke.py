@@ -513,6 +513,43 @@ def test_display_names_is_capped_at_the_grid_limit(shell):
     )
 
 
+def test_exclude_bad_exposure_unchecks_only_the_preview(shell):
+    """「排除过曝/欠曝」只动当前预览里的，而且要**说清检出了什么**。
+
+    官方要求排除过曝/欠曝。曝光是生成缩略图时顺手算的（像素已解码，几乎免费），
+    所以只覆盖预览集 —— 而那恰好是用户正在挑的那批。
+
+    判不出来时**必须明说**，不能装作检查过了 —— 那正是被删掉的那个
+    「曝光均值范围」磁贴的问题（显示一个没人能用的数字）。
+    """
+    from rdkquant.ui.calibimages import Exposure
+
+    page = shell.stage_pages[2]
+    page._displayed = ["0070.jpg", "0140.jpg", "0210.jpg"]
+    page._exposure = {
+        "0070.jpg": Exposure(mean=128.0, near_black=0.0, near_white=0.0),
+        "0140.jpg": Exposure(mean=10.0, near_black=0.85, near_white=0.0),   # 欠曝
+        # 0210 不在预览里：即使它欠曝也不该被这个按钮碰到
+        "0999.jpg": Exposure(mean=250.0, near_black=0.0, near_white=0.95),
+    }
+
+    # 没有曝光数据时明说，不假装检查过
+    page._exposure = {}
+    page._exclude_bad_exposure()
+    assert "还没有曝光数据" in shell.log_panel.log.toPlainText()
+
+    page._exposure = {
+        "0070.jpg": Exposure(mean=128.0, near_black=0.0, near_white=0.0),
+        "0140.jpg": Exposure(mean=10.0, near_black=0.85, near_white=0.0),
+        "0999.jpg": Exposure(mean=250.0, near_black=0.0, near_white=0.95),
+    }
+    page._exclude_bad_exposure()
+
+    text = shell.log_panel.log.toPlainText()
+    assert "检出 1 张过曝/欠曝" in text, "预览外的 0999 不该被算进来"
+    assert "0140.jpg" in text, "要报出是哪一张，否则用户没法核对"
+
+
 def test_log_view_appends_and_roundtrips(qapp):
     from rdkquant.ui.widgets import LogView
 

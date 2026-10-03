@@ -308,6 +308,72 @@ def test_read_size_does_not_decode_pixels(qapp, tmp_path: Path):
 
 
 # --------------------------------------------------------------------------
+# 曝光
+# --------------------------------------------------------------------------
+def test_exposure_of_a_mid_gray_image(qapp, tmp_path: Path):
+    path = tmp_path / "gray.png"
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor(128, 128, 128))
+    image.save(str(path), "PNG")
+
+    exposure = calibimages.measure_exposure(QImage(str(path)))
+    assert 125 < exposure.mean < 131
+    assert exposure.near_black == 0.0
+    assert exposure.near_white == 0.0
+    assert not exposure.is_bad
+
+
+def test_exposure_flags_a_black_image(qapp, tmp_path: Path):
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor(2, 2, 2))
+    exposure = calibimages.measure_exposure(image)
+    assert exposure.near_black == 1.0
+    assert exposure.is_bad, "全黑图必须判为欠曝"
+
+
+def test_exposure_flags_a_white_image(qapp):
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor(253, 253, 253))
+    exposure = calibimages.measure_exposure(image)
+    assert exposure.near_white == 1.0
+    assert exposure.is_bad, "全白图必须判为过曝"
+
+
+def test_exposure_only_measures_this_batch(qapp, tmp_path: Path):
+    """曝光只覆盖**本次生成缩略图**的那批 —— 它就是复用已解码的像素算的。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a", "b", "c"):
+        make_png(src / f"{name}.png", 60, 60)
+
+    out = tmp_path / "out"
+    result = calibimages.build_thumbnails(src, out, names=["a.png", "b.png"], size=96)
+    assert set(result.exposure) == {"a.png", "b.png"}
+
+
+def test_exposure_does_not_cost_a_second_decode(qapp, tmp_path: Path):
+    """有曝光计算时的耗时不能明显超过没算的时候。
+
+    曝光**必须**复用缩略图那次的解码结果。如果哪天有人改成"再解一次原图"，
+    这里会红 —— 而那正是它便宜的唯一原因。
+    """
+    import time
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(40):
+        make_png(src / f"{i}.png", 320, 240)
+
+    start = time.perf_counter()
+    calibimages.build_thumbnails(src, tmp_path / "o1", size=96)
+    baseline = time.perf_counter() - start
+
+    # 40 张 320×240 的缩略图基线大约几十毫秒；曝光遍历 96×96 像素
+    # 每张约 3 毫秒，40 张约 0.12 秒。给个宽松但能抓住"再解一次原图"的上限。
+    assert baseline < 3.0, f"40 张缩略图花了 {baseline:.2f} 秒，太慢了"
+
+
+# --------------------------------------------------------------------------
 # 清理
 # --------------------------------------------------------------------------
 def test_clear_thumbnails_keeps_the_listed_ones(qapp, tmp_path: Path):

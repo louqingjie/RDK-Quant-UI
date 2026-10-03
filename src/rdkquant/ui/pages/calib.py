@@ -88,6 +88,9 @@ class CalibPage(StagePage):
         self._stats: list[CalibStat] = []
         #: 内容重复的配对，来自扫描回包，形状 [[保留的, 重复的], ...]
         self._duplicates: list = []
+        #: 文件名 → `calibimages.Exposure`。**只覆盖当前预览集** ——
+        #: 曝光是在生成缩略图时顺带算的（像素已经解码，几乎免费）。
+        self._exposure: dict = {}
         #: 当前网格里显示的那批名字。用来判断"筛选条件改过但没刷新预览"
         self._displayed: list[str] = []
         #: 界面是否已经搭完。**构造期间控件就会发 valueChanged**（setRange/setValue），
@@ -125,9 +128,18 @@ class CalibPage(StagePage):
         self.tile_count = MetricTile("样本数")
         self.tile_res = MetricTile("分辨率")
         self.tile_dup = MetricTile("重复")
-        self.tile_exposure = MetricTile("曝光均值范围")
-        for tile in (self.tile_count, self.tile_res,
-                     self.tile_dup, self.tile_exposure):
+        # ⚠️ **刻意没有「曝光均值范围」磁贴。**
+        #
+        # 原来有一个，显示容器抽样 32 张算出的聚合区间（实测那份数据是
+        # `max_near_black=0.7158`）。但那个数字**没法用**：
+        #   1. 不知道是哪一张（只有 min/max，没有文件名）
+        #   2. 筛不掉（FilterSpec 里没有曝光维度）
+        #   3. 没有任何策略消费它（core/calib.py 里"曝光"只出现在 docstring）
+        # 一个"没人能用、也没人用"的指标摆在界面上，比没有更糟 ——
+        # 它让人以为程序检查过了。
+        #
+        # 改成**逐张**算、并且能用「排除过曝/欠曝」一键处理（见 _exclude_bad_exposure）。
+        for tile in (self.tile_count, self.tile_res, self.tile_dup):
             tiles_line.addWidget(tile)
         overview.add(tiles)
         self.backend_label = self._hint_label("尚未扫描。")
@@ -217,6 +229,7 @@ class CalibPage(StagePage):
             # 而 self.grid 在下面几行才创建 → AttributeError（实测踩过）
             ("反选", lambda: self.grid.invert_checked()),
             ("排除重复", self._exclude_duplicates),
+            ("排除过曝/欠曝", self._exclude_bad_exposure),
         ):
             picks.addWidget(self._button(text, slot))
         picks.addStretch(1)
@@ -475,6 +488,44 @@ class CalibPage(StagePage):
             "（不在当前预览里的重复项不受影响）"
         )
 
+    def _exclude_bad_exposure(self) -> None:
+        """把过曝 / 欠曝的那些取消勾选。
+
+        官方要求排除过曝、欠曝的样本。曝光是在**生成缩略图时顺手算的**
+        （像素已经解码了，几乎免费），所以它**只覆盖当前预览集** ——
+        而那恰好是用户正在挑的那批。
+
+        和「排除重复」一样，**作用在网格上而不是筛选条件上**：用户点这个按钮
+        的意图是"把选中的里面过曝欠曝的去掉"，而不是"永久改变筛选口径"。
+
+        判不出来就**明说**，不要装作检查过了 —— 那正是原来那个磁贴的问题。
+        """
+        if not self._exposure:
+            self.log.append_line(
+                "[筛选] 还没有曝光数据。先点「应用筛选并刷新预览」——"
+                "曝光是在生成预览时顺带算的。"
+            )
+            return
+        # 只处理**当前预览里**的：格子外面的勾选不该被这个按钮动到
+        displayed = self._stems(self._displayed)
+        bad = sorted(
+            name for name, exposure in self._exposure.items()
+            if exposure.is_bad and Path(name).stem in displayed
+        )
+        if not bad:
+            self.log.append_line(
+                f"[筛选] 当前预览 {len(self._displayed)} 张里没有明显过曝或欠曝的。"
+            )
+            return
+        removed = self.grid.uncheck(bad)
+        samples = "、".join(
+            f"{n}（均值 {self._exposure[n].mean:.0f}）" for n in bad[:3]
+        )
+        self.log.append_line(
+            f"[筛选] 检出 {len(bad)} 张过曝/欠曝，取消了其中 {removed} 张的勾选："
+            f"{samples}{' 等' if len(bad) > 3 else ''}"
+        )
+
     def _on_checked_changed(self) -> None:
         if not self._ready:
             return
@@ -515,6 +566,7 @@ class CalibPage(StagePage):
 
         def done(result):
             self._displayed = list(names)
+            self._exposure = dict(result.exposure)
             # 只显示这批名字对应的缩略图（thumbs 目录里可能还留着上一次的）
             wanted = {Path(n).stem + ".png" for n in names}
             self.grid.set_images(thumbs, names=sorted(wanted))
@@ -664,6 +716,7 @@ class CalibPage(StagePage):
             staged = self._staged or (self.workspace / "cal_images")
             try:
                 result = calibimages.build_thumbnails(staged, thumbs, names)
+                self._exposure = dict(result.exposure)
                 if result.unreadable:
                     self.log.append_line(
                         f"[校准] {len(result.unreadable)} 张读不出（格式不支持或文件损坏）"
@@ -722,13 +775,8 @@ class CalibPage(StagePage):
             str(len(duplicates)), tone=Tone.WARN if duplicates else Tone.OK
         )
 
-        exposure = payload.get("exposure")
-        if exposure:
-            self.tile_exposure.set_value(
-                f"{exposure.get('min_mean', '—')}~{exposure.get('max_mean', '—')}"
-            )
-        else:
-            self.tile_exposure.set_value("未测量")
+        # 容器那份抽样 32 张的 exposure 聚合值**不再显示**（原因见上面磁贴处的说明）。
+        # 逐张曝光由 `ui/calibimages.py` 在生成缩略图时算，见 self._exposure。
 
         if payload.get("ok") is False:
             self.backend_label.setText(f"扫描失败：{payload.get('error')}")
