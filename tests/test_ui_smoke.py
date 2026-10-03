@@ -457,11 +457,16 @@ def test_log_view_survives_theme_change_with_content(qapp, shell):
 # --------------------------------------------------------------------------
 # 自动探测远程体积
 # --------------------------------------------------------------------------
-def _wait_for(predicate, qapp, *, tries: int = 60, delay: float = 0.02) -> bool:
-    """等后台任务回主线程（信号要过事件循环）。"""
-    import time
+def _wait_for(predicate, qapp, *, timeout: float = 5.0, delay: float = 0.02) -> bool:
+    """等后台任务回主线程（信号要过事件循环）。
 
-    for _ in range(tries):
+    **按挂钟时间等，不按迭代次数。** 原来是 `60 次 × 20ms ≈ 1.2 秒`，
+    全量跑的时候机器忙、线程启动慢一点就超时 —— 表现为"偶发失败"，
+    而偶发失败比没有测试更糟：它教人"重跑几次就好了"。
+    （实测：同一个用例在 Linux 全量下失败过一次、单独跑和再跑一次都过。）
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         qapp.processEvents()
         if predicate():
             return True
