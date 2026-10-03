@@ -61,6 +61,9 @@ class StagePage(QWidget):
         self.context_provider = context_provider or (lambda: None)
         self.tasks = TaskRunner(self)
         self._findings: list[Finding] = []
+        #: 本页所有的动作按钮（`_button()` 建的）。任务跑起来时统一禁用，
+        #: 免得用户点了没反应又不知道为什么。
+        self._action_buttons: list[QPushButton] = []
 
         # 主体放在滚动区里：本项目的页面都比较长，而且大字号下 Qt 不会裁剪子控件，
         # 不滚动就会互相重叠（这个坑在环境页踩过）。
@@ -185,14 +188,59 @@ class StagePage(QWidget):
     # 后台任务
     # ------------------------------------------------------------------
     def start(self, job, on_done, *, label: str = "") -> bool:
+        """起一个后台任务；**顺手把"正在运行"这件事显示出来**。
+
+        以前这里只负责起线程，界面完全没反应：底部进度条一直写着「就绪」，
+        用户不知道在不在跑、要等多久。截图里 S1 正在 `docker run`，
+        整页没有任何忙碌迹象。
+        """
         if self.tasks.busy:
             return False
         if label:
             self.log.append_line(f"[{label}] 开始")
+        name = label or "正在运行"
+        self.log_panel.begin_busy(name)
+        self._set_actions_enabled(False)
+
         task = self.tasks.start(job)
+
+        def finish(result):
+            self._end_busy(f"{name}完成")
+            on_done(result)
+
+        def fail(message: str):
+            # ⚠️ 任务抛异常时 `finished` **不会**触发。不接这个信号的话，
+            # 进度条会一直转下去，看起来像卡死——比不提示还糟。
+            self.log.append_line(f"[{name}] 失败：{message}")
+            self._end_busy("失败")
+
+        def cancelled():
+            self.log.append_line(f"[{name}] 已取消")
+            self._end_busy("已取消")
+
         task.line.connect(self.log.append_line)
-        task.finished.connect(on_done)
+        task.finished.connect(finish)
+        task.failed.connect(fail)
+        task.cancelled.connect(cancelled)
         return True
+
+    def _end_busy(self, text: str) -> None:
+        self.log_panel.end_busy(text)
+        # 先全部打开，再让页面自己按"环境就绪没有"关掉该关的 ——
+        # `refresh_buttons()` 是各页面实现的，只有它知道哪些不该开。
+        self._set_actions_enabled(True)
+        self.refresh_buttons()
+
+    def _set_actions_enabled(self, enabled: bool) -> None:
+        for button in self._action_buttons:
+            button.setEnabled(enabled)
+
+    def refresh_buttons(self) -> None:
+        """按环境就绪情况刷新按钮。子类覆盖；基类什么都不做。
+
+        （基类必须有一个默认实现：`_end_busy()` 会无条件调用它，
+        而没有动作按钮的页面不需要覆盖。）
+        """
 
     # ------------------------------------------------------------------
     # 小工具
@@ -205,6 +253,7 @@ class StagePage(QWidget):
         if tooltip:
             button.setToolTip(tooltip)
         button.clicked.connect(on_click)
+        self._action_buttons.append(button)
         return button
 
     def _hint_label(self, text: str) -> QLabel:

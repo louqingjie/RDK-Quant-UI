@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -280,6 +281,117 @@ def test_log_level_classification(line, expected):
     from rdkquant.ui.widgets.logview import classify
 
     assert classify(line).value == expected
+
+
+def _ready_env(shell, monkeypatch):
+    """让环境就绪：有镜像可选中。
+
+    不做这一步的话，各页的按钮**本来就全是禁用的**（环境未就绪），
+    于是"忙碌时禁用"和"空闲时禁用"看起来一样，测试等于没测。
+    """
+    import rdkquant.ui.pages.env as env_mod
+
+    report = _fake_report()
+    report.docker = DockerStatus(cli_path="/usr/bin/docker", daemon_ok=True)
+    monkeypatch.setattr(env_mod, "probe_host", lambda *a, **k: report)
+    monkeypatch.setattr(
+        env_mod.img, "local_images",
+        lambda: [shell.env_page.specs[0].image_ref_hint],
+    )
+    monkeypatch.setattr(env_mod.img, "find_loaded", lambda *a, **k: "img:tag")
+    shell.env_page.refresh_report()
+    shell.refresh_workflow()
+
+
+def _slow_job(seconds: float = 0.5):
+    """跑得住一会的任务。
+
+    用瞬时返回的 lambda 测不出来 —— 断言执行时任务早就结束了，
+    忙碌状态自然也就清掉了。
+    """
+    def job(_emit_line, _emit_progress, _cancel):
+        time.sleep(seconds)
+        return {"ok": True}
+
+    return job
+
+
+def test_start_shows_busy_and_disables_actions(shell, qapp, monkeypatch):
+    """任务跑起来时，界面必须显示"在跑"并禁用动作按钮。
+
+    以前 `StagePage.start()` 只起线程，界面完全没反应 ——
+    截图里 S1 正在 `docker run`，整页没有任何忙碌迹象，
+    底部进度条还写着「就绪」。
+    """
+    _ready_env(shell, monkeypatch)
+    page = shell.stage_pages[0]
+    panel = shell.log_panel
+    idle = [b.isEnabled() for b in page._action_buttons]
+    assert any(idle), "环境就绪时至少该有一个按钮可用，否则测不出禁用"
+    assert not panel.busy
+
+    assert page.start(_slow_job(), lambda _r: None, label="模型解析") is True
+    qapp.processEvents()
+
+    assert panel.busy, "任务跑起来了，进度条得显示出来"
+    assert "模型解析" in panel.progress.format()
+    assert all(not b.isEnabled() for b in page._action_buttons), "跑的时候按钮应当禁用"
+
+
+def test_start_refuses_a_second_task(shell, qapp, monkeypatch):
+    """忙的时候再点，要明确拒绝（返回 False），而不是静默无反应。"""
+    _ready_env(shell, monkeypatch)
+    page = shell.stage_pages[0]
+    assert page.start(_slow_job(), lambda _r: None, label="第一次") is True
+    assert page.start(_slow_job(), lambda _r: None, label="第二次") is False
+
+
+def test_failed_task_clears_busy(shell, qapp, monkeypatch):
+    """**任务抛异常时必须清掉忙碌状态。**
+
+    `Task` 抛异常走的是 `failed` 信号，**`finished` 不会触发**。
+    不接这个信号的话进度条会一直转下去 —— 看起来像卡死，比不提示还糟。
+    """
+    _ready_env(shell, monkeypatch)
+    page = shell.stage_pages[0]
+    panel = shell.log_panel
+
+    def boom(_line, _progress, _cancel):
+        time.sleep(0.2)                # 先让忙碌状态真的出现
+        raise RuntimeError("模拟容器启动失败")
+
+    page.start(boom, lambda _r: None, label="会炸的任务")
+    qapp.processEvents()
+    assert panel.busy
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and panel.busy:
+        qapp.processEvents()
+        time.sleep(0.02)
+
+    assert not panel.busy, "任务失败后进度条不能一直转"
+    assert panel.progress.format() == "失败"
+    assert "模拟容器启动失败" in shell.log_panel.log.text_all()
+
+
+def test_finished_task_restores_the_idle_state(shell, qapp, monkeypatch):
+    """结束后按钮要**精确回到空闲时的状态**，不是一律打开。"""
+    _ready_env(shell, monkeypatch)
+    page = shell.stage_pages[0]
+    panel = shell.log_panel
+    page.refresh_buttons()
+    idle = [b.isEnabled() for b in page._action_buttons]
+
+    page.start(_slow_job(0.2), lambda _r: None, label="跑一下")
+    qapp.processEvents()
+    assert [b.isEnabled() for b in page._action_buttons] != idle
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and panel.busy:
+        qapp.processEvents()
+        time.sleep(0.02)
+
+    assert [b.isEnabled() for b in page._action_buttons] == idle
 
 
 def test_log_view_appends_and_roundtrips(qapp):

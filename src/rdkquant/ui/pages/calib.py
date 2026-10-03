@@ -748,7 +748,6 @@ class CalibPage(StagePage):
         )
         out = self.workspace / spec.output_dir_name
         source = self._staged or (self.workspace / "cal_images")
-        self.build_label.setText(f"生成中…（{len(checked)} 张）")
 
         def job(emit_line, emit_progress, cancel):
             def on_progress(done, total):
@@ -761,7 +760,10 @@ class CalibPage(StagePage):
                 on_line=emit_line, on_progress=on_progress, cancel=cancel,
             )
 
-        self.start(job, self._on_built, label="生成")
+        # **先 start 再改标签**：`start()` 在忙的时候返回 False 且不报错，
+        # 原来顺序反了 —— 明明没跑起来，界面却写着"生成中…"。
+        if self.start(job, self._on_built, label="生成"):
+            self.build_label.setText(f"生成中…（{len(checked)} 张）")
 
     def _on_built(self, payload: dict) -> None:
         if not payload.get("ok"):

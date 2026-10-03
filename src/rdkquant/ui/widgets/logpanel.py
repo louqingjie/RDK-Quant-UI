@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -28,6 +29,17 @@ from PySide6.QtWidgets import (
 
 from ..metrics import METRICS, font_with_delta
 from .logview import LogView
+
+
+def format_duration(seconds: int) -> str:
+    """把秒数说成人话。"""
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {rest} 秒" if rest else f"{minutes} 分"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes} 分"
 
 
 class LogPanel(QWidget):
@@ -75,6 +87,15 @@ class LogPanel(QWidget):
         self.progress.setFormat("就绪")
         root.addWidget(self.progress)
 
+        #: 忙碌状态的计时器。存在的意义是**证明它还活着** ——
+        #: `docker run` 起来之后可能几分钟不吐一行日志，没有这个，
+        #: 用户只能盯着一个不动的界面猜"是不是卡死了"。
+        self._busy_label = ""
+        self._busy_since = 0.0
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(500)
+        self._busy_timer.timeout.connect(self._tick_busy)
+
         self.log = LogView()
         root.addWidget(self.log, 1)
 
@@ -110,3 +131,36 @@ class LogPanel(QWidget):
             self.progress.setValue(value)
         if text:
             self.progress.setFormat(text)
+
+    # ------------------------------------------------------------------
+    # 忙碌状态
+    # ------------------------------------------------------------------
+    def begin_busy(self, label: str) -> None:
+        """进入"正在运行"状态：**不确定进度条 + 已用时间**。
+
+        为什么不是百分比：`docker run` 里的 hb_mapper 不吐结构化进度，
+        我们只能从日志里猜，猜出来的百分比是假的。与其显示一个乱跳的假进度，
+        不如老实显示"在跑 + 跑了多久"—— 用户至少能确认它活着。
+
+        （`env.py` 的镜像下载是例外，那条确实有真实百分比，走 `set_progress`。）
+        """
+        self._busy_label = label or "正在运行"
+        self._busy_since = time.monotonic()
+        self.progress.setRange(0, 0)          # 0,0 = 不确定进度（跑马灯）
+        self._tick_busy()
+        self._busy_timer.start()
+
+    def _tick_busy(self) -> None:
+        elapsed = int(time.monotonic() - self._busy_since)
+        self.progress.setFormat(f"{self._busy_label}　已用 {format_duration(elapsed)}")
+
+    @property
+    def busy(self) -> bool:
+        return self._busy_timer.isActive()
+
+    def end_busy(self, text: str = "就绪") -> None:
+        self._busy_timer.stop()
+        self._busy_label = ""
+        self.progress.setRange(0, 100)        # 先恢复范围再设值，否则值会被 0..0 吃掉
+        self.progress.setValue(0)
+        self.progress.setFormat(text)
