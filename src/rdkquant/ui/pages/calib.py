@@ -42,14 +42,13 @@ from ...core.calibfilter import (
     duplicate_names,
     filter_and_sample,
     most_common_resolution,
-    sample_evenly,
 )
 from ...core.findings import LEVEL_ERROR, LEVEL_OK, Finding
 from ...core.workflow import RunContext
 from .. import calibimages
 from ..metrics import METRICS
 from ..widgets import Card, CollapsibleSection, MetricTile, Tone
-from ..widgets.thumbnailgrid import MAX_TILES, ThumbnailGrid
+from ..widgets.thumbnailgrid import ThumbnailGrid
 from .stage import StagePage
 
 CALIBRATION_TYPES = [
@@ -61,7 +60,6 @@ CALIBRATION_TYPES = [
     ("skip", "skip —— 跳过校准（不需要数据）"),
 ]
 CAL_DATA_TYPES = [("float32", "float32"), ("uint8", "uint8")]
-THUMB_SUBDIR = ".rdkquant/thumbs"
 
 #: 认得的图片后缀。容器里的探针有一份同样的清单；这里这份是**宿主侧**用的
 #: （决定把哪些文件收进工作区），不依赖容器就能跑。
@@ -86,9 +84,6 @@ class CalibPage(StagePage):
         self._stats: list[CalibStat] = []
         #: 内容重复的配对，来自扫描回包，形状 [[保留的, 重复的], ...]
         self._duplicates: list = []
-        #: 文件名 → `calibimages.Exposure`。**只覆盖当前预览集** ——
-        #: 曝光是在生成缩略图时顺带算的（像素已经解码，几乎免费）。
-        self._exposure: dict = {}
         #: 当前网格里显示的那批名字。用来判断"筛选条件改过但没刷新预览"
         self._displayed: list[str] = []
         #: 界面是否已经搭完。**构造期间控件就会发 valueChanged**（setRange/setValue），
@@ -198,13 +193,14 @@ class CalibPage(StagePage):
         #
         # 上限就是网格能显示的张数：超过它就没法逐个勾选，是个隐藏的坑。
         self.count_box = QSpinBox()
-        self.count_box.setRange(0, MAX_TILES)
+        # 上限跟着数据量走：装条目现在是免费的，没有硬上限了
+        self.count_box.setRange(0, 100000)
         self.count_box.setValue(50)
         self.count_box.setSpecialValueText("全部")
         self.count_box.setSuffix(" 张")
         self.count_box.setToolTip(
             "从筛完的结果里**均匀**取多少张来预览和挑选"
-            f"（0 = 全部用上，最多 {MAX_TILES} 张）。\n"
+            f"（0 = 全部用上，上限不设 —— 缩略图随滚动生成）。\n"
             "均匀取样而不是随机：结果可复现，而且数据集通常按时间/场景排序，\n"
             "间隔取样天然覆盖各个片段。"
         )
@@ -368,19 +364,15 @@ class CalibPage(StagePage):
         return {Path(n).stem for n in names}
 
     def _display_names(self) -> list[str]:
-        """筛选 + 采样之后，**实际会显示在网格里**的名字。
+        """筛选 + 采样之后，应当出现在网格里的名字。
 
-        上限是 `MAX_TILES` —— 网格只放得下这么多。`_displayed` 必须和网格里
-        真实的条目一致，否则"勾选与预览是否一致"会拿一个用户根本看不到的集合去比。
-
-        超出时**均匀采样**而不是取前 N 个：取前 N 个会让预览永远只覆盖数据集的开头。
+        **不再截断到 `MAX_TILES`。** 那个上限存在的唯一理由是"批量生成缩略图
+        太贵"，而现在装条目是免费的、解码是按需的（见 widgets/thumbnailgrid.py）。
         """
         _result, names = filter_and_sample(
             self._stats, self.filter_spec(),
             count=self.count_box.value(), duplicates=self._duplicates,
         )
-        if len(names) > MAX_TILES:
-            names = sample_evenly(names, MAX_TILES)
         return names
 
     def _on_filter_changed(self) -> None:
@@ -489,39 +481,38 @@ class CalibPage(StagePage):
     def _exclude_bad_exposure(self) -> None:
         """把过曝 / 欠曝的那些取消勾选。
 
-        官方要求排除过曝、欠曝的样本。曝光是在**生成缩略图时顺手算的**
-        （像素已经解码了，几乎免费），所以它**只覆盖当前预览集** ——
-        而那恰好是用户正在挑的那批。
+        官方要求排除过曝、欠曝的样本。曝光是在**缩略图解码时顺带算的**
+        （像素已经解出来了，几乎免费），所以它**只覆盖已经滚过、解码过的那些**。
 
-        和「排除重复」一样，**作用在网格上而不是筛选条件上**：用户点这个按钮
-        的意图是"把选中的里面过曝欠曝的去掉"，而不是"永久改变筛选口径"。
-
-        判不出来就**明说**，不要装作检查过了 —— 那正是原来那个磁贴的问题。
+        这是能力上的**减弱**：原来批量生成时能覆盖整个预览集。换来的是不再
+        为它解码全量（3504 张要 15 秒）。所以日志必须**如实说明覆盖了多少张** ——
+        不能假装检查过全部，那正是被删掉的那个「曝光均值范围」磁贴的毛病。
         """
-        if not self._exposure:
+        exposure = self.grid.exposure_for(self._displayed)
+        decoded = self.grid.decoded_rows()
+        if not exposure:
             self.log.append_line(
-                "[筛选] 还没有曝光数据。先点「应用筛选并刷新预览」——"
-                "曝光是在生成预览时顺带算的。"
+                "[筛选] 还没有曝光数据 —— 曝光是缩略图解码时顺带算的，"
+                "先在预览里滚动一下让图片加载出来。"
             )
             return
-        # 只处理**当前预览里**的：格子外面的勾选不该被这个按钮动到
-        displayed = self._stems(self._displayed)
-        bad = sorted(
-            name for name, exposure in self._exposure.items()
-            if exposure.is_bad and Path(name).stem in displayed
-        )
+
+        bad = sorted(name for name, item in exposure.items() if item.is_bad)
         if not bad:
             self.log.append_line(
-                f"[筛选] 当前预览 {len(self._displayed)} 张里没有明显过曝或欠曝的。"
+                f"[筛选] 已解码 {decoded} 张，其中没有明显过曝或欠曝的。"
+                "（未解码的不在检查范围内）"
             )
             return
+
         removed = self.grid.uncheck(bad)
         samples = "、".join(
-            f"{n}（均值 {self._exposure[n].mean:.0f}）" for n in bad[:3]
+            f"{n}（均值 {exposure[n].mean:.0f}）" for n in bad[:3]
         )
         self.log.append_line(
-            f"[筛选] 检出 {len(bad)} 张过曝/欠曝，取消了其中 {removed} 张的勾选："
-            f"{samples}{' 等' if len(bad) > 3 else ''}"
+            f"[筛选] 已解码 {decoded} 张，检出 {len(bad)} 张过曝/欠曝，"
+            f"取消了其中 {removed} 张的勾选：{samples}"
+            f"{' 等' if len(bad) > 3 else ''}（未解码的不在检查范围内）"
         )
 
     def _on_checked_changed(self) -> None:
@@ -531,11 +522,12 @@ class CalibPage(StagePage):
         self.envChanged.emit()
 
     def _on_apply_filter(self) -> None:
-        """用当前筛选 + 采样结果重新生成缩略图。
+        """用当前筛选 + 采样结果刷新预览。
 
-        **缩略图在宿主机上生成**（`ui/calibimages.py`，用 Qt），不跑容器 ——
-        实测 120 张 0.71 秒 vs 容器 4.96 秒（7x）。它只是界面要用的东西，
-        不是量化工作。（真正需要容器的只有生成校准数据那一步。）
+        **只重装条目，不预生成缩略图。** 网格按需解码（`widgets/thumbnailgrid.py`）：
+        装 3504 个条目是免费的，真正解码只发生在格子滚到可见时。
+        原来要在容器里批量生成 —— 3504 张 26.5 秒 + 35 MB，而当时还只能靠
+        `MAX_TILES = 200` 把数量压住。
         """
         if not self._stats:
             self.log.append_line("[筛选] 请先扫描。")
@@ -549,30 +541,16 @@ class CalibPage(StagePage):
             self._refresh_funnel()
             return
 
-        thumbs = self.workspace / THUMB_SUBDIR
-
-        def job(emit_line, _emit_progress, cancel):
-            result = calibimages.build_thumbnails(
-                staged, thumbs, names, cancel=cancel.is_set,
-            )
-            if result.unreadable:
-                emit_line(
-                    f"[筛选] {len(result.unreadable)} 张读不出（格式不支持或文件损坏）："
-                    + "、".join(result.unreadable[:3])
-                )
-            return result
-
-        def done(result):
-            self._displayed = list(names)
-            self._exposure = dict(result.exposure)
-            # 只显示这批名字对应的缩略图（thumbs 目录里可能还留着上一次的）
-            wanted = {Path(n).stem + ".png" for n in names}
-            self.grid.set_images(thumbs, names=sorted(wanted))
-            self.log.append_line(f"[筛选] 预览已刷新：{result.generated} 张")
-            self._refresh_funnel()
-            self.envChanged.emit()
-
-        self.start(job, done, label="筛选")
+        # **不再预生成缩略图。** 网格按需解码（见 widgets/thumbnailgrid.py）——
+        # 装 3504 个条目是免费的，真正解码只发生在格子滚到可见时。
+        # 原来这一步要在容器里批量生成，3504 张要 26.5 秒 + 35 MB。
+        self._displayed = list(names)
+        self.grid.set_images(staged, names=names)
+        self.log.append_line(
+            f"[筛选] 预览已刷新：{len(names)} 张（缩略图随滚动生成）"
+        )
+        self._refresh_funnel()
+        self.envChanged.emit()
 
     # ------------------------------------------------------------------
     def refresh_buttons(self) -> None:
@@ -744,27 +722,12 @@ class CalibPage(StagePage):
 
         self._evaluate()
         names = self._display_names()
+        # 直接把**源图目录**交给网格。缩略图由它按需解码 ——
+        # 这里不再预生成任何东西，装 3504 张也是瞬间的。
+        staged = self._staged or (self.workspace / "cal_images")
         if names:
-            # 缩略图在这里生成：**宿主机 Qt**，不跑容器（实测 120 张 0.71 秒
-            # vs 容器 4.96 秒）。放在 `_on_scanned` 而不是扫描那个 job 里，
-            # 是因为要先有逐张统计才知道该画哪几张。
-            thumbs = self.workspace / THUMB_SUBDIR
-            staged = self._staged or (self.workspace / "cal_images")
-            try:
-                result = calibimages.build_thumbnails(staged, thumbs, names)
-                self._exposure = dict(result.exposure)
-                if result.unreadable:
-                    self.log.append_line(
-                        f"[校准] {len(result.unreadable)} 张读不出（格式不支持或文件损坏）"
-                    )
-                self.grid.set_images(
-                    thumbs, names=sorted({Path(n).stem + ".png" for n in names})
-                )
-                self._displayed = list(names)
-            except Exception as exc:      # 缩略图失败不该毁掉整次扫描
-                self.log.append_line(f"[校准] 缩略图生成失败：{exc}")
-                self.grid.clear()
-                self._displayed = []
+            self.grid.set_images(staged, names=names)
+            self._displayed = list(names)
         else:
             self.grid.clear()
             self._displayed = []
@@ -812,7 +775,7 @@ class CalibPage(StagePage):
         )
 
         # 容器那份抽样 32 张的 exposure 聚合值**不再显示**（原因见上面磁贴处的说明）。
-        # 逐张曝光由 `ui/calibimages.py` 在生成缩略图时算，见 self._exposure。
+        # 逐张曝光由网格在解码缩略图时顺带算，见 `ThumbnailGrid.exposure_for()`。
 
         if payload.get("ok") is False:
             self.backend_label.setText(f"扫描失败：{payload.get('error')}")

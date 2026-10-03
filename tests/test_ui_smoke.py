@@ -488,66 +488,69 @@ def test_grid_names_and_displayed_names_are_compared_by_stem(shell, tmp_path: Pa
     assert page._stems(checked) <= page._stems(page._displayed)
 
 
-def test_display_names_is_capped_at_the_grid_limit(shell):
-    """`_displayed` 必须和网格里**真实显示**的条目一致。
+def test_display_names_is_not_capped(shell):
+    """预览**不再**截断到 `MAX_TILES`。
 
-    网格上限是 `MAX_TILES`。`count_box = 0`（全部）时若筛选结果超过上限，
-    以前 `_display_names()` 会返回全部名字 —— 于是 `_displayed` 说 1172 张，
-    而网格里只有 200 个，"勾选与预览是否一致"就在拿一个用户看不到的集合比。
+    那个上限存在的唯一理由是"批量生成缩略图太贵"。现在缩略图是按需解码的
+    （见 `widgets/thumbnailgrid.py`），装条目免费，所以上限没有存在理由了。
+
+    （本条原为 `test_display_names_is_capped_at_the_grid_limit`。
+    行为有意改变，理由记在提交信息里。）
     """
     from rdkquant.core.calibfilter import CalibStat
-    from rdkquant.ui.widgets.thumbnailgrid import MAX_TILES
 
     page = shell.stage_pages[2]
     page._stats = [
         CalibStat(name=f"{i:05d}.jpg", size=1000, width=640, height=640)
-        for i in range(MAX_TILES * 3)
+        for i in range(600)
     ]
     page.count_box.setValue(0)                     # 0 = 全部用上
 
     names = page._display_names()
-    assert len(names) == MAX_TILES
-    assert names[0] == "00000.jpg"
-    assert names[-1] != page._stats[MAX_TILES - 1].name, (
-        "超出上限时要**均匀采样**，不能只取前 N 个（那样永远只覆盖数据集开头）"
-    )
+    assert len(names) == 600, "不再截断"
+    assert names[0] == "00000.jpg" and names[-1] == "00599.jpg"
 
 
-def test_exclude_bad_exposure_unchecks_only_the_preview(shell):
-    """「排除过曝/欠曝」只动当前预览里的，而且要**说清检出了什么**。
+def test_exclude_bad_exposure_reports_its_coverage(shell, tmp_path: Path):
+    """「排除过曝/欠曝」必须**如实说明覆盖了多少张**。
 
-    官方要求排除过曝/欠曝。曝光是生成缩略图时顺手算的（像素已解码，几乎免费），
-    所以只覆盖预览集 —— 而那恰好是用户正在挑的那批。
-
-    判不出来时**必须明说**，不能装作检查过了 —— 那正是被删掉的那个
-    「曝光均值范围」磁贴的问题（显示一个没人能用的数字）。
+    曝光是缩略图解码时顺带算的，所以只覆盖**已经滚过、解出来**的那些。
+    这是能力上的减弱（原来批量生成时能覆盖整个预览集），换来的是不再为它
+    解码全量。判不出来就明说 —— 不能假装检查过全部，那正是被删掉的
+    那个「曝光均值范围」磁贴的毛病。
     """
+    from PySide6.QtGui import QColor, QImage
+
     from rdkquant.ui.calibimages import Exposure
 
     page = shell.stage_pages[2]
-    page._displayed = ["0070.jpg", "0140.jpg", "0210.jpg"]
-    page._exposure = {
-        "0070.jpg": Exposure(mean=128.0, near_black=0.0, near_white=0.0),
-        "0140.jpg": Exposure(mean=10.0, near_black=0.85, near_white=0.0),   # 欠曝
-        # 0210 不在预览里：即使它欠曝也不该被这个按钮碰到
-        "0999.jpg": Exposure(mean=250.0, near_black=0.0, near_white=0.95),
-    }
+    source = tmp_path / "cal"
+    source.mkdir()
+    for index in range(3):
+        image = QImage(60, 40, QImage.Format.Format_RGB32)
+        image.fill(QColor(120, 120, 120))
+        image.save(str(source / f"{index:04d}.jpg"), "JPEG")
 
-    # 没有曝光数据时明说，不假装检查过
-    page._exposure = {}
+    names = [f"{i:04d}.jpg" for i in range(3)]
+    page._displayed = list(names)
+    page.grid.set_images(source, names=names)
+
+    # 还没解码 → 明说，不假装检查过
     page._exclude_bad_exposure()
     assert "还没有曝光数据" in shell.log_panel.log.toPlainText()
 
-    page._exposure = {
-        "0070.jpg": Exposure(mean=128.0, near_black=0.0, near_white=0.0),
-        "0140.jpg": Exposure(mean=10.0, near_black=0.85, near_white=0.0),
-        "0999.jpg": Exposure(mean=250.0, near_black=0.0, near_white=0.95),
+    # 注入"已解码"的状态：第 1 张欠曝（模拟滚过之后）
+    page.grid._exposure = {
+        0: Exposure(mean=128.0, near_black=0.0, near_white=0.0),
+        1: Exposure(mean=10.0, near_black=0.85, near_white=0.0),
     }
     page._exclude_bad_exposure()
 
     text = shell.log_panel.log.toPlainText()
-    assert "检出 1 张过曝/欠曝" in text, "预览外的 0999 不该被算进来"
-    assert "0140.jpg" in text, "要报出是哪一张，否则用户没法核对"
+    assert "已解码 2 张" in text, "必须报出覆盖范围"
+    assert "检出 1 张过曝/欠曝" in text
+    assert "0001.jpg" in text, "要报出是哪一张，否则用户没法核对"
+    assert "未解码的不在检查范围内" in text
 
 
 def test_log_view_appends_and_roundtrips(qapp):

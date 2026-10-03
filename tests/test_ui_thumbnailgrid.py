@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from rdkquant.ui.widgets.thumbnailgrid import MAX_TILES, ThumbnailGrid  # noqa: E402
+from rdkquant.ui.widgets.thumbnailgrid import ThumbnailGrid  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -287,16 +287,23 @@ def test_set_images_can_filter_by_name(grid, thumbs):
     assert grid.checked_names() == ["0002.png", "0005.png"]
 
 
-def test_set_images_respects_the_tile_limit(qapp, tmp_path):
-    """超过上限只显示前 MAX_TILES 个 —— 所以采样张数的上限就是它，
-    否则会有"选了却勾不到"的隐藏坑。"""
+def test_set_images_does_not_truncate(qapp, tmp_path):
+    """**不再有数量上限。**
+
+    原来是 `MAX_TILES = 200`，理由是"批量生成缩略图太贵"。现在装条目免费、
+    解码按需，所以上限没有存在理由。而且它当时是个**隐藏的坑**：
+    采样张数设成 300 也只能勾到 200 张。
+
+    （本条原为 `test_set_images_respects_the_tile_limit`，行为有意改变。）
+    """
     directory = tmp_path / "many"
     directory.mkdir()
-    for index in range(MAX_TILES + 25):
+    for index in range(1500):
         (directory / f"{index:05d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     widget = ThumbnailGrid()
     count = widget.set_images(directory)
-    assert count == MAX_TILES
+    assert count == 1500
+    assert widget.decoded_rows() == 0, "装 1500 个条目不该解码任何一张"
 
 
 def test_set_images_on_missing_directory_is_empty(grid, tmp_path):
