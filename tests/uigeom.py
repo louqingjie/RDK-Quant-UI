@@ -185,16 +185,24 @@ def check_no_repr_leak(root: QWidget) -> list[str]:
 
 
 def check_all(view: QWidget) -> list[str]:
-    """一次跑完所有检查。
+    """一次跑完所有检查，**包括嵌在里面的视图**。
 
-    `visible_indexes` 只算一次然后复用 —— 单独调每个检查会各算一遍，
+    `visible_indexes` 每个视图只算一次然后复用 —— 单独调每个检查会各算一遍，
     3504 个条目时那是三倍的 `visualRect` 调用。
+
+    ⚠️ 传一个**页面**进来时，页面本身不是 `QAbstractItemView`，
+    但它里面嵌着表格和网格 —— 不递归下去的话，几何检查等于没跑
+    （实测：先写成不递归，校准页"通过"了，而网格一个矩形都没量）。
     """
     problems: list[str] = []
-    if isinstance(view, QAbstractItemView):
-        indexes = visible_indexes(view)
-        problems += check_icon_items_fit(view, indexes)
-        problems += check_no_overlap(view, indexes)
+
+    views = [view] if isinstance(view, QAbstractItemView) else []
+    views += view.findChildren(QAbstractItemView)
+    for item_view in views:
+        indexes = visible_indexes(item_view)
+        problems += check_icon_items_fit(item_view, indexes)
+        problems += check_no_overlap(item_view, indexes)
+
     problems += check_interactive_widgets(view)
     problems += check_no_repr_leak(view)
     return problems

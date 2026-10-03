@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QLabel,
     QListView,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -226,3 +227,20 @@ def test_check_all_is_clean_for_a_healthy_view(qapp):
 def test_check_all_reports_the_broken_one(qapp):
     problems = uigeom.check_all(_icon_view(qapp, with_icons=False))
     assert any("装不下" in p for p in problems), "汇总入口要能带出几何问题"
+
+
+def test_check_all_recurses_into_nested_views(qapp):
+    """传一个**页面**进来时，里面嵌的视图也要量。
+
+    先写成不递归，结果校准页"通过"了，而网格一个矩形都没量 ——
+    空页面和好页面得到同样的结果，这种检查比没有更糟。
+    """
+    root = QWidget()
+    root.resize(600, 400)
+    layout = QVBoxLayout(root)
+    layout.addWidget(_icon_view(qapp, with_icons=False))   # 故意坏的网格
+    root.show()
+    qapp.processEvents()
+
+    problems = uigeom.check_all(root)
+    assert any("装不下" in p for p in problems), "嵌套的坏网格必须被带出来"

@@ -23,6 +23,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rdkquant.ui.widgets.thumbnailgrid import ThumbnailGrid  # noqa: E402
 
+import uigeom  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -395,6 +397,105 @@ def test_height_is_capped_for_a_huge_set(qapp, tmp_path: Path):
 def test_set_images_on_missing_directory_is_empty(grid, tmp_path):
     assert grid.set_images(tmp_path / "不存在") == 0
     assert grid.checked_names() == []
+
+
+# --------------------------------------------------------------------------
+# 几何自检（`tests/uigeom.py`）
+#
+# 这一节是那个真 bug 的门禁：条目只有 14px 高、96px 的缩略图压住邻居的
+# 文件名和勾选框。所有 model 层面的断言都看不见它 —— 得量视图的矩形。
+# --------------------------------------------------------------------------
+def _shown_grid(qapp, directory: Path, *, icons: int = 32) -> ThumbnailGrid:
+    widget = ThumbnailGrid()
+    widget.resize(1000, 540)
+    widget.show()
+    for _ in range(2):
+        qapp.processEvents()
+    widget.set_images(directory)
+    for _ in range(4):
+        qapp.processEvents()
+    return widget
+
+
+def test_geometry_check_is_clean_for_a_real_grid(qapp, real_images: Path):
+    widget = _shown_grid(qapp, real_images)
+    assert uigeom.check_all(widget) == [], "正常网格不该有任何几何问题"
+
+
+@pytest.mark.parametrize("icon,cell", [(64, 84), (96, 116), (128, 148)])
+def test_geometry_holds_across_tile_sizes(qapp, real_images: Path, icon: int, cell: int):
+    """换几档格子尺寸都要成立 —— 尺寸常量是会被人调的。"""
+    from PySide6.QtCore import QSize
+
+    widget = ThumbnailGrid()
+    widget.setIconSize(QSize(icon, icon))
+    widget.setGridSize(QSize(cell, cell + 36))
+    widget.resize(1000, 540)
+    widget.show()
+    for _ in range(2):
+        qapp.processEvents()
+    widget.set_images(real_images)
+    for _ in range(4):
+        qapp.processEvents()
+
+    assert uigeom.check_all(widget) == []
+
+
+def test_geometry_check_catches_a_broken_placeholder(qapp, real_images: Path):
+    """把占位图改回**空 `QIcon()`**（修复前的状态），检查必须报出来。
+
+    这就是那个 bug 的确切机制：`data(DecorationRole)` 返回空图标 →
+    delegate 按"只有文字"算高度（14 px）→ `setUniformItemSizes(True)`
+    把它用到全部条目上。
+    """
+    from PySide6.QtGui import QIcon
+
+    widget = _shown_grid(qapp, real_images)
+    widget._model.placeholder = QIcon()          # 复现修复前
+    # 缓存清掉，让视图重新去问（否则已经解出来的图标还在）
+    widget._model._icons.clear()
+    widget._model.layoutChanged.emit()
+    for _ in range(4):
+        qapp.processEvents()
+
+    problems = uigeom.check_all(widget)
+    assert any("装不下" in p for p in problems), (
+        f"空占位图必须被报出来，实际只报了：{problems}"
+    )
+
+
+def test_geometry_check_stays_fast_with_thousands_of_items(qapp):
+    """3000 个条目也要能跑 —— 检查只量**可见**的那些，不能退化成 O(n²)。
+
+    这里**直接填模型**，不走 `set_images`：要测的是**检查的复杂度**，不是装
+    条目的路径（那条由 `test_set_images_does_not_truncate` 和
+    `test_height_is_capped_for_a_huge_set` 覆盖）。走 `set_images` 的话
+    光造 3000 个文件加解码尝试就要 0.6 秒，而且会刷一屏 libpng 报错。
+    """
+    import time
+
+    widget = ThumbnailGrid()
+    widget.resize(1000, 540)
+    widget.show()
+    for _ in range(2):
+        qapp.processEvents()
+
+    count = 3000
+    widget._model.reset(
+        [f"{index:05d}.png" for index in range(count)],
+        [Path(f"/nowhere/{index:05d}.png") for index in range(count)],
+    )
+    widget._directory = None          # 不触发解码：这条测试不关心图
+    for _ in range(2):
+        qapp.processEvents()
+
+    visible = len(uigeom.visible_indexes(widget))
+    assert 0 < visible < count // 10, "可见条目应当远少于总数，否则这条没意义"
+
+    start = time.perf_counter()
+    uigeom.check_all(widget)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.5, f"{count} 个条目的自检花了 {elapsed:.2f} 秒，太慢"
 
 
 def test_clear(grid):

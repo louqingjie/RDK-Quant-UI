@@ -1335,3 +1335,72 @@ def test_carriage_return_progress_does_not_pile_up(shell):
     assert clean_for_display("  0%|          | 0/1\r 50%|#####     |\r100%|##########|") \
         == "100%|##########|"
     assert clean_for_display("普通行") == "普通行"
+
+
+# --------------------------------------------------------------------------
+# 界面自检（`tests/uigeom.py`）
+#
+# 本会话三次「代码能跑、测试全绿、界面上是错的」。这里守的是其中**可机械
+# 判定**的部分：可见控件不被压成 0 尺寸、文案不漏 `None` / `Traceback`、
+# 视图里的条目装得下图标和文字。
+#
+# ⚠️ 它**抓不到**另外两类 —— 代码路径没被走到（那是少写一条测试）、
+# 文案说的和代码相反（没有通用定义）。别因为这一节绿了就以为界面不会再错。
+# --------------------------------------------------------------------------
+def test_every_page_passes_the_generic_ui_checks(shell, qapp):
+    """8 个页面建出来之后逐个过一遍通用自检。"""
+    import uigeom
+
+    checked = []
+    for row in range(shell.nav.count()):
+        shell.nav.setCurrentRow(row)
+        for _ in range(3):
+            qapp.processEvents()
+        page = shell.stack.currentWidget()
+        assert page is not None, f"第 {row} 页是空的"
+        problems = uigeom.check_all(page)
+        assert not problems, f"第 {row} 页（{type(page).__name__}）没通过：{problems}"
+        checked.append(type(page).__name__)
+
+    assert len(checked) == shell.nav.count(), "每一页都要真的走到"
+    assert "CalibPage" in checked, "校准页必须在内 —— 那个真 bug 就在它里面"
+
+
+def test_calib_page_geometry_with_real_tiles(shell, qapp, tmp_path: Path):
+    """校准页**填上真图**之后，几何自检也要过。
+
+    不填的话网格是空的，`visible_indexes` 返回空 —— 几何检查等于没跑。
+    那个真 bug（条目只有 14px 高、缩略图压住文件名和勾选框）就是在这里。
+    """
+    import uigeom
+    from PySide6.QtGui import QColor, QImage
+
+    page = shell.stage_pages[2]
+    # ⚠️ **必须切到校准页。** 外壳默认停在第 0 页，不切的话网格所在的页面是
+    # 隐藏的，`visible_indexes` 会（正确地）返回空 —— 于是这条测试对着一个
+    # 空网格"通过"，什么都没量。
+    for row in range(shell.nav.count()):
+        if shell.nav.item(row).data(0x0100) == "calib":
+            shell.nav.setCurrentRow(row)
+            break
+    for _ in range(3):
+        qapp.processEvents()
+
+    source = tmp_path / "geo"
+    source.mkdir()
+    names = []
+    for index in range(12):
+        image = QImage(320, 240, QImage.Format.Format_RGB32)
+        image.fill(QColor(120, 130, 140))
+        name = f"{index:04d}.jpg"
+        assert image.save(str(source / name), "JPEG")
+        names.append(name)
+
+    page._displayed = list(names)
+    page.grid.set_images(source, names=names)
+    page.scroll.ensureWidgetVisible(page.grid, 0, 0)
+    for _ in range(5):
+        qapp.processEvents()
+
+    assert uigeom.visible_indexes(page.grid), "网格里得有可见条目，否则这条等于没测"
+    assert uigeom.check_all(page) == []

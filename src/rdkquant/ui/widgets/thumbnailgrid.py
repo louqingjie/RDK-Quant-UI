@@ -243,6 +243,23 @@ class ThumbnailGrid(QListView):
     #: 勾选集合发生变化
     checkedChanged = Signal()
 
+    def setIconSize(self, size: QSize) -> None:  # noqa: N802
+        """改图标尺寸时**必须同时重建占位图**。
+
+        占位图是给 delegate 算条目高度用的（见 `ThumbnailModel` 的说明），
+        它按**当时的** `iconSize` 造好就固定了。之后改 `iconSize` 而不重建，
+        条目高度还是旧尺寸 —— **不报错**，只是图又压在文字上。
+
+        （这条是可参数化的几何自检抓出来的：`iconSize=128` 而条目仍按 96 算。
+        生产代码目前只在构造时设一次，所以没暴露，但那是运气。）
+        """
+        super().setIconSize(size)
+        model = getattr(self, "_model", None)
+        if model is not None:
+            blank = QPixmap(self.iconSize())
+            blank.fill(Qt.GlobalColor.transparent)
+            model.placeholder = QIcon(blank)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setViewMode(QListView.ViewMode.IconMode)
