@@ -383,6 +383,30 @@ class ThumbnailGrid(QListView):
             counter["changed"] = changed
         return changed
 
+    def check_only(self, names: Iterable[str]) -> int:
+        """**只**勾选这些名字，其余全不勾。返回实际勾上了几个。
+
+        `uncheck()` 的反操作。两者都用 `_bulk()` 包住 —— 逐行发
+        `dataChanged` 会让上千行的网格一格一格重绘（见 `_bulk` 的说明）。
+
+        没匹配上的名字不算失败：调用方可能拿的是**源文件名**（`.jpg`）而网格里
+        存的是缩略图名（`.png`），那类不一致由调用方按 stem 对齐后再传进来。
+        """
+        wanted = set(names)
+        changed = 0
+        with self._bulk() as counter:
+            touched = []
+            for row in range(self._model.rowCount()):
+                match = self._model.name_at(row) in wanted
+                if match != self._model.is_checked(row):
+                    self._model.set_checked(row, match)
+                    touched.append(row)
+                if match:
+                    changed += 1
+            self._model.notify_checked(touched)
+            counter["changed"] = changed
+        return changed
+
     # ------------------------------------------------------------------
     # 内容
     # ------------------------------------------------------------------

@@ -1580,10 +1580,13 @@ def test_convert_page_override_checkbox_reaches_the_context(shell, qapp):
     assert ctx.conversion_override is False
 
 
-def test_convert_page_shows_the_calibration_time_estimate(shell, qapp):
-    """校准很慢（实测每张约 164 秒），界面必须**事先说**。
+def test_convert_page_warns_about_too_many_calibration_samples(shell, qapp):
+    """选了 380 张时必须说话 —— 那是官方建议上限的 3.8 倍。
 
-    380 张 = 17 小时，用户点一下要等一整晚 —— 不说的话这是最糟的一种"卡住"。
+    **但刻意不给预估时间。** 曾经给过（「每张约 164 秒」），而那是在**一个数据集**
+    上量出来的：同一台机器同一个模型，换一组校准图，单张成本从 168 秒掉到 2.7 秒
+    —— 差 60 倍。`default` / `mix` 都是搜索策略，搜索深度由数据决定（官方 FAQ
+    6.6.1.4 / 6.6.1.5），所以任何跑前的常数都是在编。
     """
     from rdkquant.core.workflow import CalibSummary
 
@@ -1595,9 +1598,28 @@ def test_convert_page_shows_the_calibration_time_estimate(shell, qapp):
 
     text = page.estimate_label.text()
     assert "380" in text
-    assert "小时" in text
-    assert "参考" in text, "必须标明是参考值 —— 换机器换模型就不准"
-    assert "建议" in text, "这么久要给一条行动建议（筛到 100 张以内）"
+    assert "20~100" in text, "要给出官方建议区间这个锚点"
+    assert "自动挑选" in text, "超了要给一条可执行的建议"
+
+    for banned in ("小时", "分钟", "秒"):
+        assert banned not in text, (
+            f"不该出现时间预估（出现了「{banned}」）—— 60 倍的不确定性下，"
+            "任何跑前的数字都是误导；真实速度由 hb_mapper 自己的进度条报"
+        )
+
+
+def test_convert_page_says_nothing_alarming_at_a_reasonable_count(shell, qapp):
+    """50 张以内是官方推荐做法，不该报警。"""
+    from rdkquant.core.workflow import CalibSummary
+
+    page = _step_page(shell, Stage.CONVERT)
+    ctx = shell.context
+    ctx.calibration_type = "default"
+    ctx.calib = CalibSummary(count=50, cal_data_dir="calib_bin_f32")
+    page._update_estimate()
+    text = page.estimate_label.text()
+    assert "50" in text
+    assert "自动挑选" not in text, "没超线就不该推按钮"
 
 
 def test_convert_page_estimate_is_quiet_when_calibration_is_not_needed(shell, qapp):
@@ -1608,4 +1630,144 @@ def test_convert_page_estimate_is_quiet_when_calibration_is_not_needed(shell, qa
     ctx.calibration_type = "skip"
     ctx.calib = CalibSummary(count=380, cal_data_dir="calib_bin_f32")
     page._update_estimate()
-    assert page.estimate_label.text() == "", "skip 不需要校准数据，不该报耗时"
+    assert page.estimate_label.text() == "", "skip 不需要校准数据，不该报张数"
+
+
+# --------------------------------------------------------------------------
+# S3 的「自动挑选」
+# --------------------------------------------------------------------------
+def _calib_page(shell):
+    return shell.stage_pages[2]
+
+
+def _write_gradient_images(source: Path, count: int, *, solid: bool = False) -> list[str]:
+    """造一批**亮度各不相同**的图 —— 分层抽样要有东西可分。"""
+    from PySide6.QtGui import QColor, QImage
+
+    source.mkdir(parents=True, exist_ok=True)
+    names = []
+    for index in range(count):
+        level = 8 + int(index * 240 / max(1, count - 1))
+        image = QImage(64, 64, QImage.Format.Format_RGB32)
+        # 一半纯色（离散度≈0，官方点名的"纯色图片"），一半带纹理
+        image.fill(QColor(level, level, level))
+        if not solid and index % 2 == 1:
+            for y in range(0, 64, 4):
+                for x in range(0, 64, 4):
+                    image.setPixelColor(x, y, QColor(255 - level, 255 - level, 255 - level))
+        name = f"{index:04d}.jpg"
+        assert image.save(str(source / name), "JPEG")
+        names.append(name)
+    return names
+
+
+def _stage_thumbnails(thumbs: Path, stems) -> list[str]:
+    """铺一批**真实存在**的缩略图（`.png`），返回文件名。
+
+    ⚠️ `ThumbnailGrid.set_images()` 要求目录真实存在且里面有文件 ——
+    `if directory.is_dir()` 不成立就直接装 0 条。给它一个不存在的目录，
+    网格是空的，而**测试会以"勾选了 0 张"的形式通过**（实测踩过）。
+    """
+    from PySide6.QtGui import QColor, QImage
+
+    thumbs.mkdir(parents=True, exist_ok=True)
+    names = []
+    for stem in stems:
+        image = QImage(16, 16, QImage.Format.Format_RGB32)
+        image.fill(QColor(90, 90, 90))
+        name = f"{stem}.png"
+        assert image.save(str(thumbs / name), "PNG")
+        names.append(name)
+    return names
+
+
+def test_calib_page_has_an_auto_pick_button(shell, qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    page = _calib_page(shell)
+    assert "自动挑选" in [b.text() for b in page.findChildren(QPushButton)]
+
+
+def test_calib_auto_picked_maps_source_names_onto_grid_stems(shell, qapp, tmp_path: Path):
+    """挑选结果要落到**网格的勾选状态**上，而且必须**按 stem 对齐**。
+
+    ⚠️ 候选来自**源文件**（`.jpg`，`Candidate.name`），而网格里存的是**缩略图**
+    名（`.png`）。直接比字符串会一张都匹配不上 —— 本项目踩过一次同样的坑
+    （「勾选与当前预览不一致」那条假告警，根因就是 `.png` vs `.jpg`）。
+
+    这里刻意让源目录和缩略图目录不同名，就是为了守住这个映射。
+    """
+    from rdkquant.core.calibpick import Candidate, pick
+
+    page = _calib_page(shell)
+    stems = [f"{i:04d}" for i in range(12)]
+    source = tmp_path / "src"
+    source.mkdir()
+    for stem in stems:                       # 源文件用 .jpg
+        (source / f"{stem}.jpg").write_bytes(b"x")
+    thumb_names = _stage_thumbnails(tmp_path / "thumbs", stems)   # 网格用 .png
+
+    page._displayed = [f"{stem}.jpg" for stem in stems]
+    page.grid.set_images(tmp_path / "thumbs", names=thumb_names)
+    assert page.grid.all_names(), "网格没装上 —— 缩略图目录得是真实存在的"
+
+    candidates = [Candidate(name=f"{stem}.jpg", brightness=20.0 + i * 15, spread=60.0)
+                  for i, stem in enumerate(stems)]
+    result = pick(candidates, count=6)
+    page._on_auto_picked(result)
+
+    checked = set(page.grid.checked_names())
+    assert checked, "一张都没勾上 —— 多半是 .jpg / .png 没按 stem 对齐"
+    # 候选名是 `0003.jpg`，网格里是 `0003.png` —— 对照要按 stem 做
+    expected = {f"{Path(name).stem}.png" for name in result.chosen}
+    assert checked == expected
+    assert len(checked) == result.count
+
+
+def test_calib_auto_pick_runs_end_to_end(shell, qapp, tmp_path: Path):
+    """从真图走到勾选状态，全程不报错、结果落在网格上。"""
+    page = _calib_page(shell)
+    source = tmp_path / "auto"
+    names = _write_gradient_images(source, 24)
+    stems = [n[:-4] for n in names]
+    thumb_names = _stage_thumbnails(tmp_path / "thumbs2", stems)
+
+    page.directory = str(source)
+    page._displayed = list(names)
+    page.grid.set_images(tmp_path / "thumbs2", names=thumb_names)
+    assert page.grid.all_names()
+
+    page._on_auto_pick()
+    assert _wait_for(
+        lambda: 0 < len(page.grid.checked_names()) < len(page.grid.all_names()),
+        qapp, timeout=30.0,
+    ), "自动挑选没回来，或者没有剔掉任何一张"
+
+    checked = page.grid.checked_names()
+    assert 0 < len(checked) < 24, "挑选应当比全选少（纯色/重复会被剔掉）"
+
+
+def test_calib_funnel_warns_above_the_slow_threshold(shell, qapp, tmp_path: Path):
+    """漏斗那行要在超过慢速线时提醒 —— 用户看不到的话这条防线等于没有。"""
+    from rdkquant.core import calibpick
+    from rdkquant.core.calibfilter import CalibStat
+
+    page = _calib_page(shell)
+    total = calibpick.SLOW_THRESHOLD + 10
+    stems = [f"{i:04d}" for i in range(total)]
+    thumb_names = _stage_thumbnails(tmp_path / "thumbs3", stems)
+
+    page._stats = [CalibStat(name=f"{stem}.jpg", size=1000, width=640, height=640)
+                   for stem in stems]
+    page._duplicates = []
+    page._displayed = [f"{stem}.jpg" for stem in stems]
+    page.grid.set_images(tmp_path / "thumbs3", names=thumb_names)
+    assert len(page.grid.checked_names()) == total, "set_images 默认全选"
+
+    page._refresh_funnel()
+    assert "变慢" in page.funnel_label.text(), page.funnel_label.text()
+
+    # 降到线以内就该闭嘴
+    page.grid.check_only(thumb_names[:10])
+    page._refresh_funnel()
+    assert "变慢" not in page.funnel_label.text(), page.funnel_label.text()

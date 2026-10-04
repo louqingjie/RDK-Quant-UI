@@ -32,6 +32,7 @@ from ...core.calib import (
     evaluate_probe,
     expected_hw_from_shape,
 )
+from ...core import calibpick
 from ...core.calibfilter import (
     CalibStat,
     FilterSpec,
@@ -214,6 +215,7 @@ class CalibPage(StagePage):
             ("反选", lambda: self.grid.invert_checked()),
             ("排除重复", self._exclude_duplicates),
             ("排除过曝/欠曝", self._exclude_bad_exposure),
+            ("自动挑选", self._on_auto_pick, ),
         ):
             picks.addWidget(self._button(text, slot))
         picks.addStretch(1)
@@ -398,6 +400,14 @@ class CalibPage(StagePage):
             parts.append(f"已选 {checked}")
         self.funnel_label.setText(" → ".join(parts))
 
+        # 张数超过慢速线时明说 —— `default` / `mix` 是搜索策略，成本随样本数
+        # 线性涨，而每张的成本又被数据难度放大（实测 60 倍）
+        too_many = calibpick.slow_warning(checked)
+        if too_many is not None and self._displayed:
+            self.funnel_label.setText(
+                self.funnel_label.text() + f"　⚠️ {too_many.message}"
+            )
+
         if kept == 0 and self.filter_spec().active:
             self.funnel_label.setText(
                 f"共 {total} 张 → 筛选后 0 张（筛掉：{result.explain()}）"
@@ -497,6 +507,78 @@ class CalibPage(StagePage):
             f"取消了其中 {removed} 张的勾选：{samples}"
             f"{' 等' if len(bad) > 3 else ''}（未解码的不在检查范围内）"
         )
+
+    def _on_auto_pick(self) -> None:
+        """按官方口径自动挑选校准集。
+
+        **为什么值得做。** 官方（X5 手册 6.3.3）要求 20~100 张、来自训练/验证集、
+        **不要异常样本（纯色图片、不含目标的图片）**；社区口径是 >50 张校准会明显变慢。
+        而"随手勾一批"或"均匀采样"两条都不满足。
+
+        代价不是抽象的：实测同一份数据，**未经筛选**的图比正常图慢 **60 倍**
+        （168 s/张 vs 2.7 s/张）—— `default` / `mix` 都是**搜索**策略，
+        数据越"难"，升级得越深、敏感节点越多（官方 FAQ 6.6.1.4 / 6.6.1.5）。
+
+        **只做机械可判的那部分**：去重、剔纯色、按亮度分层。
+        「不含目标」判不了（要模型推理），所以预览必须留着 —— 用户还是得看一眼。
+        """
+        if not self._displayed:
+            self.log.append_line("[挑选] 请先扫描并刷新预览。")
+            return
+        source = Path(self.directory)
+        names = list(self._displayed)
+
+        def job(emit_line, emit_progress, cancel):
+            emit_line(
+                f"[挑选] 全量测量 {len(names)} 张（逐张解码，约十几秒）…"
+            )
+
+            def on_progress(done: int, total: int) -> None:
+                # 测量占前 90%，剩下 10% 留给挑选本身（几毫秒）——
+                # 全给测量的话进度条会停在 100% 之前就跳走
+                emit_progress(int(done * 90 / max(1, total)), f"测量 {done}/{total}")
+
+            candidates = calibimages.measure_candidates(
+                source, names, on_progress=on_progress, cancel=cancel.is_set,
+            )
+            result = calibpick.pick(candidates, count=calibpick.TARGET)
+            emit_progress(100, "挑选完成")
+            return result
+
+        self.start(job, self._on_auto_picked, label="挑选")
+
+    def _on_auto_picked(self, result) -> None:
+        """把挑选结果落到网格的勾选状态上。
+
+        ⚠️ 名字要**按 stem 对齐**：候选是**源文件**名（`.jpg`），而网格里存的
+        是缩略图名（`.png`）。直接比字符串会一张都匹配不上 —— 这个坑本项目
+        踩过一次（「勾选与当前预览不一致」那条假告警）。
+        """
+        wanted = self._stems(result.chosen)
+        names = [n for n in self.grid.all_names() if self._stems([n]) & wanted]
+        picked = self.grid.check_only(names)
+
+        self.log.append_line(
+            f"[挑选] 从 {len(self.grid.all_names())} 张里挑了 {picked} 张"
+            f"（目标 {calibpick.TARGET}，官方建议 20~100）"
+        )
+        if result.dropped_solid:
+            self.log.append_line(
+                f"[挑选] 剔除 {len(result.dropped_solid)} 张近纯色图："
+                + "、".join(result.dropped_solid[:5])
+            )
+        if result.dropped_duplicate:
+            self.log.append_line(
+                f"[挑选] 剔除 {len(result.dropped_duplicate)} 张近似重复帧："
+                + "、".join(result.dropped_duplicate[:5])
+            )
+        for bucket in result.buckets:
+            if bucket.pool == 0 and bucket.quota:
+                self.log.append_line(
+                    f"[挑选] 亮度 {bucket.low}~{bucket.high} 这个区间**一张都没有** —— "
+                    "数据集本身缺这一段，不是筛选剔掉的。"
+                )
+        self.set_findings(result.findings)
 
     def _on_checked_changed(self) -> None:
         if not self._ready:

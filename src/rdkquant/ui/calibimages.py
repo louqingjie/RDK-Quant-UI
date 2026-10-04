@@ -53,6 +53,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QImageReader
 
 from ..core.calibfilter import CalibStat
+from ..core.calibpick import SOLID_SPREAD, Candidate
 
 #: 认得的图片后缀。与 `data/rdkquant_probe.py` 的 `IMAGE_EXTS` 保持一致 ——
 #: 两边必须认得同一批文件，否则"容器扫得到、宿主机看不到"会变成新的坑。
@@ -102,6 +103,10 @@ class Exposure:
     mean: float
     near_black: float
     near_white: float
+    #: 灰度**标准差**。判「纯色图片」用它 —— 两端占比判不出来：
+    #: 一张整片 128 灰的图 near_black / near_white 都是 0，而它正是官方
+    #: 点名的"纯色图片"。默认 0 只为兼容旧构造点，测量路径都会填。
+    spread: float = 0.0
 
     @property
     def is_bad(self) -> bool:
@@ -111,6 +116,11 @@ class Exposure:
         也不要误伤正常图 —— 一次误排除会悄悄縮小校准集，而用户看不出来。
         """
         return self.near_black > 0.5 or self.near_white > 0.5 or self.mean < 12 or self.mean > 243
+
+    @property
+    def is_solid(self) -> bool:
+        """是不是近纯色。阈值在 `core/calibpick.py` 里（策略归 core）。"""
+        return self.spread < SOLID_SPREAD
 
 
 #: 亮度判据（0~255）
@@ -124,6 +134,9 @@ def measure_exposure(image: QImage) -> Exposure:
     为什么用缩略图而不是原图：像素已经为了预览解码了，顺手遍历一遍几乎免费。
     缺点是只覆盖**预览集**（50~200 张）而不是全量 3504 —— 但那恰好是用户
     正在挑的那批。全量逐张算就得解码 3504 张，把刚拿到的 32 倍又还回去。
+
+    ⚠️ **这个局限正是「自动挑选」必须另走 `measure_candidates()` 的原因** ——
+    按亮度分层要求覆盖**全量**，只统计看过的那几十张给不出分层依据。
     """
     small = image.convertToFormat(QImage.Format.Format_RGB888)
     width, height = small.width(), small.height()
@@ -134,6 +147,7 @@ def measure_exposure(image: QImage) -> Exposure:
     raw = bytes(small.constBits())
     count = width * height
     total = near_black = near_white = 0
+    squares = 0.0
     for y in range(height):
         row = y * stride
         for x in range(width):
@@ -141,11 +155,15 @@ def measure_exposure(image: QImage) -> Exposure:
             # ITU-R BT.601 亮度
             luma = (raw[at] * 299 + raw[at + 1] * 587 + raw[at + 2] * 114) // 1000
             total += luma
+            squares += luma * luma
             if luma < _NEAR_BLACK_LUMA:
                 near_black += 1
             elif luma > _NEAR_WHITE_LUMA:
                 near_white += 1
-    return Exposure(total / count, near_black / count, near_white / count)
+    mean = total / count
+    # 总体标准差（除以 n，不是 n-1）：这里是整张图的描述统计，不是抽样估计
+    variance = max(0.0, squares / count - mean * mean)
+    return Exposure(mean, near_black / count, near_white / count, variance ** 0.5)
 
 
 def _scaled(image: QImage, size: int) -> QImage:
@@ -178,6 +196,99 @@ def load_thumbnail(path: Path, size: int = 96) -> tuple[QImage, Exposure] | None
         return None
     thumb = _scaled(image, size)
     return thumb, measure_exposure(thumb)
+
+
+# --------------------------------------------------------------------------
+# 全量测量 —— 给「按官方口径自动挑选」用
+#
+# ⚠️ 和上面的按需解码**不是一回事**：预览网格只为用户看过的那些格子解码，
+# 所以那里的曝光统计只覆盖几十张。而按亮度分层要求覆盖**全量**，否则分层
+# 依据是偏的。（这正是当初判断"曝光统计没用"的真正原因 —— 不是这个统计
+# 没用，是它被喂了一份有偏的样本。）
+# --------------------------------------------------------------------------
+
+#: 测量用缩略尺寸。**32 而不是 96**：这一步要过全量 3504 张，
+#: 每张 96² = 9216 个像素的 Python 循环会到十几秒，32² = 1024 只要几秒。
+#: 判"纯色"和"亮度"在 32×32 上完全够 —— 纯色图在哪个尺度上都是纯色。
+MEASURE_SIZE = 32
+
+
+def _luma_and_hash(image: QImage, size: int) -> tuple[list[int], str] | None:
+    """缩放 → 灰度 → 返回 (亮度列表, aHash 指纹)。"""
+    small = _scaled(image, size).convertToFormat(QImage.Format.Format_RGB888)
+    width, height = small.width(), small.height()
+    if width <= 0 or height <= 0:
+        return None
+
+    stride = small.bytesPerLine()
+    raw = bytes(small.constBits())
+    luma: list[int] = []
+    for y in range(height):
+        row = y * stride
+        for x in range(width):
+            at = row + x * 3
+            luma.append((raw[at] * 299 + raw[at + 1] * 587 + raw[at + 2] * 114) // 1000)
+
+    # aHash：8×8 灰度块，逐个和均值比。和参考实现（RDK-BPU 的
+    # `prepare_calibration_data.py`）一致 —— 那里也是直接比均值取布尔串。
+    fingerprint = ""
+    if len(luma) >= 64:
+        side = 8
+        step = len(luma) // (side * side)
+        block = [sum(luma[i * step:(i + 1) * step]) / step
+                 for i in range(side * side)] if step else []
+        if block:
+            average = sum(block) / len(block)
+            bits = "".join("1" if value > average else "0" for value in block)
+            fingerprint = f"{int(bits, 2):016x}"
+    return luma, fingerprint
+
+
+def measure_candidates(
+    directory: Path,
+    names: Sequence[str] | None = None,
+    *,
+    size: int = MEASURE_SIZE,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancel: CancelCheck | None = None,
+) -> list[Candidate]:
+    """**逐张全量解码**，量出挑校准集要用的三个事实：亮度、离散度、指纹。
+
+    这一步是 O(全量) 的解码，3504 张大约几秒 —— 所以只在用户**显式**点
+    「自动挑选」时做，不做成隐式开销。
+
+    ⚠️ 只产出纯数据（`Candidate`），**不做任何筛选决策** ——
+    策略在 `core/calibpick.py`，那里可以脱离 Qt 单独测。
+    """
+    if names is None:
+        files = image_files(directory)
+    else:
+        files = [directory / name for name in names]
+
+    total = len(files)
+    out: list[Candidate] = []
+    for index, path in enumerate(files, start=1):
+        if cancel is not None and cancel():
+            break
+        image = QImage(str(path))
+        if not image.isNull():
+            measured = _luma_and_hash(image, size)
+            if measured is not None:
+                luma, fingerprint = measured
+                count = len(luma)
+                mean = sum(luma) / count
+                variance = max(0.0, sum(v * v for v in luma) / count - mean * mean)
+                out.append(Candidate(
+                    name=path.name,
+                    brightness=mean,
+                    spread=variance ** 0.5,
+                    fingerprint=fingerprint,
+                    width=image.width(),
+                    height=image.height(),
+                ))
+        if on_progress is not None:
+            on_progress(index, total)
+    return out
 
 
 @dataclass

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
 
+from ...core import calibpick
 from ...core.backends import Workspace
 from ...core.conversion import (
     MAKERTBIN_LOG_NAME,
@@ -37,24 +38,6 @@ from .stage import StagePage
 
 ARTIFACT_HEADERS = ["产物", "文件", "大小"]
 SUMMARY_HEADERS = ["项", "值"]
-
-#: 实测（X5 **CPU** 镜像 + 640×640 YOLO）：每张校准样本约 164 秒。
-#:
-#: ⚠️ 这是**在某一台机器、某一个模型上**测出来的，换机器换模型就不准。
-#: 界面上必须照实标注是参考值 —— 编一个精确的进度条比不给还糟。
-CALIB_SECONDS_PER_SAMPLE = 164.0
-
-#: 超过这个时长就明确提醒（"点一下要等一整晚"那种）
-CALIB_SLOW_HOURS = 2.0
-
-
-def format_duration(seconds: float) -> str:
-    """把秒数说成人话。"""
-    if seconds < 60:
-        return f"{seconds:.0f} 秒"
-    if seconds < 3600:
-        return f"{seconds / 60:.0f} 分钟"
-    return f"{seconds / 3600:.1f} 小时"
 
 
 def format_size(size: int) -> str:
@@ -172,10 +155,17 @@ class ConvertPage(StagePage):
         self._table(self.summary_view, self.summary_model, min_rows=4)
 
     def _update_estimate(self) -> None:
-        """校准耗时预估。
+        """校准的**事前**提示。
 
-        **标注成参考值。** 数字来自一次实测（每张约 164 秒），换机器换模型都
-        会变 —— 给一个看起来很精确的进度条比不给更糟。
+        ⚠️ **这里刻意不给预估时间。** 曾经给过（「每张约 164 秒」），但那是
+        **在一个数据集上量出来的**：同一台机器、同一个模型，换一组校准图，
+        单张成本从 168 秒掉到 **2.7 秒** —— 差 60 倍。
+
+        原因官方 FAQ 写得很清楚（6.6.1.4 / 6.6.1.5）：`default` 与 `mix` 都是
+        **搜索**策略，搜索深度由**数据**决定。任何跑前的常数都是在编。
+
+        所以这里只说**能确定的事**：多少张、官方建议多少、超了会怎样。
+        真实速度由 `hb_mapper` 自己的进度条在跑的时候报出来 —— 那是实测值。
         """
         ctx = self.context_provider()
         if ctx is None or not ctx.calibration_needs_data:
@@ -186,12 +176,11 @@ class ConvertPage(StagePage):
             self.estimate_label.setText("")
             return
 
-        seconds = count * CALIB_SECONDS_PER_SAMPLE
-        text = (f"校准 {count} 张，按上次实测每张约 {CALIB_SECONDS_PER_SAMPLE:.0f} 秒"
-                f"估算，大约 {format_duration(seconds)}（仅供参考，换机器会变）")
-        if seconds >= CALIB_SLOW_HOURS * 3600:
-            text += (f"。官方建议校准集 20~100 张 —— 现在这个量级会跑很久，"
-                     f"建议回第 3 步筛到 100 张以内。")
+        text = (f"本次校准 {count} 张。官方建议 20~100 张；超过 "
+                f"{calibpick.SLOW_THRESHOLD} 张后会明显变慢"
+                f"（{ctx.calibration_type} 是搜索策略，成本随张数线性增长）。")
+        if count > calibpick.SLOW_THRESHOLD:
+            text += "建议回第 3 步点「自动挑选」降下来。"
         self.estimate_label.setText(text)
 
     # ------------------------------------------------------------------

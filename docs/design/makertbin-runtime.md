@@ -8,24 +8,70 @@
 | 情况 | 用时 |
 |---|---|
 | `calibration_type: skip`，`0708.onnx`（YOLO 1×3×640×640）**跑完** | **87 秒** |
-| `calibration_type: default`，同模型 | 每张样本 **164 秒** × 380 张 ≈ **17 小时** |
+| `max`，5 张样本 | 0.2 秒/张（**4.89 it/s**） |
+| `default`，5 张**好图** | 2–3 秒/张 |
+| `default`，那组**坏图**（见下） | **168 秒/张** |
 
-    calibration in progress: 10/380 [25:00<16:49:12, 163.65s/it]
+## ⚠️ 校准耗时：**和校准图强相关，差 60 倍**
 
-**380 是样本数，不是「自动搜索的次数」。** 任何 `calibration_type` 都要跑这么多张；
-`default` 只是把它们按参数组合分组：
+同一个模型、同一台机器（i5-10400，容器拿到 12 核、无 cgroup 配额）、
+同样的 5 张样本数，**只换校准图**：
 
-    The activation calibration parameters:
-        calibration_type:     ['max', 'kl']
-        max_percentile:       [0.99995, 1.0]
-        per_channel:          [True, False]
-        asymmetric:           [True, False]
-    The modelwise search parameters:
-        similarity:           0.995
-        metric:               cosine-similarity
+| 校准图 | `max` | `default` |
+|---|---|---|
+| `0002,0011,0053,0058,0065`（按文件名取的前 5 张） | 0.2 s/张 | **168 s/张** |
+| `2913,3412,0177,3127,3278`（另一组） | — | 2.7 s/张 |
+| `0011,0053,0058,0065`（上一组去掉 0002） | — | 2.7 s/张 |
+| `0002,0894,2714,0769,1600`（最暗的 5 张） | — | 2.7 s/张 |
+| `0894` + 4 张正常 | — | 2.7 s/张 |
 
-**对 S4 的含义**：开始转换前要把「样本数 × 单张耗时」估出来给用户看，否则点一下
-要等一整晚。官方建议的 20~100 张**不只是代表性，也是时间问题**。
+**排除掉的假设**（都做了对照）：不是样本数（5 张和 380 张的单张成本一样）、
+不是机器被抢（空闲机器上复现）、不是暗图、不是明暗混合、不是图片相关性、
+不是 `default` 本身（好图上它只比 `max` 慢 10 倍）。
+
+**唯一站得住的描述**：那一组图会触发 `default` 的病态路径。机制在
+`pyquantizer.so` 里，看不到。
+
+### 为什么搜索类校准会这样 —— 官方 FAQ 给出了机制
+
+`default` 是**分步升级**的（[官方 FAQ 6.6.1.4](https://developer.d-robotics.cc/api/v1/fileData/x5_doc-v126cn/oe_mapper/source/ptq/ptq_faq_troubleshooting/ptq_faq.html)）：
+
+| 步骤 | 做什么 | 进入下一步的条件 |
+|---|---|---|
+| Step1 | 试 Max / Max-P 0.99995 / KL | **最高余弦相似度 < 0.995** |
+| Step2 | 加 perchannel 组合 | **还是 < 0.995** |
+| Step3 | 再加非对称量化，5 种里选最佳 | — |
+
+`mix` 是**逐节点**的（[6.6.1.5](https://developer.d-robotics.cc/api/v1/fileData/x5_doc-v126cn/oe_mapper/source/ptq/ptq_faq_troubleshooting/ptq_faq.html)）：
+
+| 步骤 | 做什么 |
+|---|---|
+| Step1 | 用 KL 算**每个节点的量化敏感度** |
+| Step2 | **遍历所有敏感节点**，每个试 Max / Max-P / KL |
+| Step3 | 评估 4 种模型的累积误差，输出最优 |
+
+**数据越"难"，升级越深、敏感节点越多，成本成倍涨。**
+喂一堆异常样本就是在主动触发最贵的路径 —— 所以这不是"运气不好"，
+是**输入不合规的必然后果**。
+
+### 官方对校准集的要求（我们违反了两条）
+
+[X5 手册 6.3.3](https://developer.d-robotics.cc/api/v1/fileData/x5_doc-v126cn/oe_mapper/source/ptq/ptq_usage/prepare_calibration_data.html)：
+
+> 校准阶段会需要 **20~100 份**的标定样本……**不要使用非常少见的异常样本，
+> 例如纯色图片、不含任何检测或分类目标的图片等**。
+
+社区实践（引 Model Zoo 的警告阈值）：**20 张起步；>50 张校准会很慢**。
+
+**我们此前是 380 张（超 3.8 倍）、且未经任何筛选** —— 两条都不满足。
+
+### 对 S4 / S3 的含义
+
+1. **不要在跑之前承诺时间。** 曾经给过「每张约 164 秒」，而好图上是 2.7 秒 ——
+   **错 60 倍**，方向还不确定。真实速度由 `hb_mapper` 自己的进度条在跑时报出来。
+2. **S3 要按官方口径挑图**：`core/calibpick.py` 做去重 + 剔纯色 + 按亮度分层，
+   界面上的「自动挑选」按钮跑它。
+3. **超过 50 张就要提醒**（`calibpick.SLOW_THRESHOLD`）。
 
 **探索时用 `skip`** —— 87 秒 vs 十几小时。
 
