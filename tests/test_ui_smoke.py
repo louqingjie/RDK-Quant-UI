@@ -1640,6 +1640,64 @@ def _calib_page(shell):
     return shell.stage_pages[2]
 
 
+def test_staging_replaces_instead_of_merging(shell, qapp, tmp_path: Path):
+    """**回归**：工作区里已有同名旧文件时，收进工作区必须**替换**而不是合并。
+
+    实测踩过：工作区 `cal_images/` 里躺着上一次扫描的 3504 张，而新选的 50 张
+    **文件同名**（它们本来就是从那份数据里挑出来的），于是 50 张全部覆盖到同名
+    旧文件上 —— 目录里**仍然是 3504 张**，用户以为自己只选了 50 张。
+    日志还写着"已收进工作区：50 张"，更坐实了误解。
+    """
+    import threading
+
+    page = _calib_page(shell)
+    workspace = Path(page.workspace)
+
+    # 工作区里已有 20 张旧图，名字和新选的**重名**
+    target = workspace / "cal_images"
+    target.mkdir(parents=True, exist_ok=True)
+    for index in range(20):
+        (target / f"{index:04d}.jpg").write_bytes(b"stale-" + b"x" * 100)
+
+    # 源目录在工作区**之外**，只有 3 张，名字和旧的重合
+    source = tmp_path / "fresh"
+    source.mkdir()
+    for index in range(3):
+        (source / f"{index:04d}.jpg").write_bytes(b"fresh-" + b"y" * 200)
+
+    lines: list[str] = []
+    staged = page._stage(source, lines.append, lambda *_a: None, threading.Event())
+    assert staged == target
+
+    landed = sorted(p.name for p in target.iterdir() if p.is_file())
+    assert landed == ["0000.jpg", "0001.jpg", "0002.jpg"], (
+        f"目录里应当只剩新选的 3 张，实际 {len(landed)} 张 —— 合并回来了"
+    )
+    for name in landed:
+        assert (target / name).read_bytes().startswith(b"fresh-"), \
+            f"{name} 还是旧内容 —— 覆盖没生效"
+
+    # 日志要**如实报目录里的张数**，不是"复制了几个"
+    assert any("已收进工作区：3 张" in line for line in lines), lines
+    assert any("清掉工作区里上一次的 20 张" in line for line in lines), lines
+
+
+def test_staging_skips_when_the_source_is_already_inside(shell, qapp):
+    """源目录本来就在工作区里时不折腾 —— 原样返回。"""
+    import threading
+
+    page = _calib_page(shell)
+    inside = Path(page.workspace) / "cal_images"
+    inside.mkdir(parents=True, exist_ok=True)
+    (inside / "a.jpg").write_bytes(b"x")
+
+    lines: list[str] = []
+    staged = page._stage(inside, lines.append, lambda *_a: None, threading.Event())
+    assert staged == inside
+    assert lines == [], "已经在工作区里就不该打印任何收进动作"
+    assert (inside / "a.jpg").exists(), "更不该把自己清掉"
+
+
 def _write_gradient_images(source: Path, count: int, *, solid: bool = False,
                            side: int = 400) -> list[str]:
     """造一批**彼此可区分**的图 —— 分层抽样和去重都要有东西可分。

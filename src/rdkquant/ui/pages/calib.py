@@ -669,6 +669,15 @@ class CalibPage(StagePage):
         "目录不存在"（实测）。这和 S1 把模型复制进 `model/` 是同一个道理。
 
         已经在工作区里的就不用动。
+
+        ⚠️ **目标目录要先清空，是"替换"不是"合并"。** 实测踩过：工作区里躺着
+        上一次的 **3504 张**，而新选的 50 张**文件同名**（它们本来就是从那份数据里
+        挑出来的），于是 50 张全部覆盖到同名旧文件上，目录里**仍然是 3504 张** ——
+        用户以为自己只选了 50 张。当时日志还写着"已收进工作区：50 张"，
+        更坐实了这个误解：那句话数的是**处理了几个**，不是**目录里现在有几个**。
+
+        合并还有一个更隐蔽的坏处：先扫 A 数据集再扫 B 数据集，目录里是**两个
+        数据集的和**，而界面上只显示了 B。替换就没这个问题。
         """
         source = Path(source)
         if not source.is_dir():
@@ -690,19 +699,34 @@ class CalibPage(StagePage):
             emit_line(f"[校准] {source} 里没有可识别的图片")
             return None
 
+        stale = [p for p in target.iterdir() if p.is_file()]
+        if stale:
+            emit_line(
+                f"[校准] 清掉工作区里上一次的 {len(stale)} 张"
+                "（目标目录是替换而不是累加）"
+            )
+            for path in stale:
+                if cancel.is_set():
+                    emit_line("[校准] 已取消")
+                    return None
+                path.unlink()
+
         emit_line(f"[校准] 正在把 {len(pending)} 张图片收进工作区（cal_images/）…")
-        copied = 0
         for index, path in enumerate(pending, start=1):
             if cancel.is_set():
                 emit_line("[校准] 已取消")
                 return None
-            dest = target / path.name
-            # 同名同大小就跳过，重复扫描不会反复复制
-            if not (dest.exists() and dest.stat().st_size == path.stat().st_size):
-                shutil.copy2(path, dest)
-            copied += 1
+            shutil.copy2(path, target / path.name)
             emit_progress(int(index * 100 / len(pending)), f"复制 {index}/{len(pending)}")
-        emit_line(f"[校准] 已收进工作区：{copied} 张 → cal_images/")
+
+        # 收完**数一遍**再报。报"复制了几个"和报"目录里现在有几个"是两件事 ——
+        # 混在一起正是上一个 bug 让人看不出来的原因。
+        landed = sum(1 for p in target.iterdir() if p.is_file())
+        emit_line(f"[校准] 已收进工作区：{landed} 张 → cal_images/")
+        if landed != len(pending):
+            emit_line(
+                f"[校准] ⚠️ 目录里的张数（{landed}）和源目录（{len(pending)}）对不上"
+            )
         return target
 
     @staticmethod
