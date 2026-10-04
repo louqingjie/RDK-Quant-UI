@@ -41,7 +41,7 @@ from ...core.calibfilter import (
     filter_and_sample,
     most_common_resolution,
 )
-from ...core.findings import LEVEL_ERROR, LEVEL_OK, Finding
+from ...core.findings import LEVEL_ERROR, LEVEL_OK, LEVEL_WARN, Finding
 from ...core.workflow import RunContext
 from .. import calibimages
 from ..metrics import METRICS
@@ -978,6 +978,20 @@ class CalibPage(StagePage):
 
         written = payload.get("written")
         total = payload.get("bytes") or 0
+        cleared = payload.get("cleared") or 0
+
+        # 清掉旧产物这件事**必须说出来** —— 那是一次删除。
+        # 静默删掉上次的 380 个文件、而用户只看到"已生成 50 个"，是不诚实的；
+        # 反过来（清了多少不说、目录里张数又对不上）正是上一个 bug 的样子。
+        if cleared:
+            self.log.append_line(
+                f"[生成] 清掉了 {payload.get('out_dir')}/ 里上一次的 {cleared} 个旧产物"
+            )
+
+        # 收完**数一遍目录**再报 —— 报"写了几个"和报"目录里现在有几个"是两件事。
+        # 宿主侧 `_stage()` 就是因为把这两个混在一句话里，让"选 50 张扫出 3504 张"
+        # 那个 bug 一直看不出来。
+        landed = self._count_built(payload.get("out_dir") or "")
         self.build_label.setText(
             f"已写出 {written} 个样本到 {payload.get('out_dir')}/，"
             f"共 {total / 1024 / 1024:.1f} MB，"
@@ -991,8 +1005,25 @@ class CalibPage(StagePage):
             f"已生成 {written} 个二进制校准样本（{payload.get('dtype')}）",
             "字节数已逐个核对；第 4 步把它写进 config.yaml 的 cal_data_dir。",
         ))
+        if landed is not None and written is not None and landed != written:
+            findings.append(Finding(
+                LEVEL_WARN, "CALIB_BUILT_COUNT_MISMATCH",
+                f"{payload.get('out_dir')}/ 里有 {landed} 个文件，"
+                f"但本次只写了 {written} 个",
+                "目录里有本次之外的残留。第 4 步会读到它们，实际用的样本数和"
+                "界面显示的不是一回事。",
+            ))
         self.set_findings(findings)
         self.envChanged.emit()
+
+    def _count_built(self, name: str) -> int | None:
+        """数一下产物目录里现在有几个文件。数不出来返回 None（不猜）。"""
+        if not name:
+            return None
+        target = self.workspace / name
+        if not target.is_dir():
+            return None
+        return sum(1 for p in target.iterdir() if p.is_file())
 
     # ------------------------------------------------------------------
     def apply_to(self, ctx: RunContext) -> None:

@@ -41,7 +41,7 @@ SCAN_CONTRACT = {
     "stats_count",
 }
 BUILD_CONTRACT = {
-    "ok", "backend", "written", "failed", "failures", "bytes",
+    "ok", "backend", "written", "cleared", "failed", "failures", "bytes",
     "bytes_per_sample", "out_dir", "shape", "layout", "color", "dtype",
     "normalized",
 }
@@ -211,6 +211,29 @@ def test_mock_build_honours_cancellation(tmp_path: Path):
         on_line=lambda _l: None, cancel=cancel,
     )
     assert payload["ok"] is False
+
+
+def test_mock_build_clears_the_output_directory(tmp_path: Path):
+    """**回归**：产物目录必须先清空，和真探针一致。
+
+    文件名是 `<序号>.bin`，不清的话上一次多出来的那些会原样留着 ——
+    目录里是上一次的张数，而界面显示的是这一次的。实测在宿主侧 `_stage()`
+    踩过同一个坑（选 50 张、扫出 3504 张）。
+    """
+    ws = B.Workspace(tmp_path / "run").ensure()
+    backend = B.MockBackend(workspace=ws, delay=0.0)
+    out = ws.root / "calib_out"
+    out.mkdir(parents=True, exist_ok=True)
+    for index in range(7):
+        (out / f"{index:04d}.bin").write_bytes(b"stale")
+
+    payload = backend.build_calib(
+        ws.calib_dir, out, CalibBuildSpec(shape="1x3x640x640", only=("a.jpg", "b.jpg")),
+        on_line=lambda _l: None,
+    )
+    assert payload["written"] == 2
+    assert payload["cleared"] == 7, "旧的 7 个要报出来，不能静默删"
+    assert len(list(out.iterdir())) == 2, "目录里应当只剩这一次的 2 个"
 
 
 # --------------------------------------------------------------------------

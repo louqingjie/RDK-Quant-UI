@@ -411,6 +411,7 @@ MOCK_BUILD = {
     "ok": True,
     "backend": "PIL",
     "written": MOCK_CALIB_COUNT,
+    "cleared": 0,
     "failed": 0,
     "failures": [],
     "bytes": MOCK_CALIB_COUNT * MOCK_SAMPLE_BYTES,
@@ -591,6 +592,14 @@ class MockBackend:
         self.workspace.ensure()
         on_line(f"$ (mock) probe.py calib-build {src.name} {out.name}")
         out.mkdir(parents=True, exist_ok=True)
+        # **先清空输出目录**，和真探针一致（见 `rdkquant_probe.py` 的
+        # `cmd_calib_build`）。不清的话上一次多出来的产物会原样留着 ——
+        # 目录里是上一次的张数，而界面显示的是这一次的。
+        cleared = 0
+        for old in out.iterdir():
+            if old.is_file():
+                old.unlink()
+                cleared += 1
         # 名单优先于采样（和真实探针一致）
         count = len(spec.only) if spec.only else (spec.count or MOCK_SCAN["count"])
         per_sample = MOCK_BUILD["bytes_per_sample"]
@@ -611,6 +620,7 @@ class MockBackend:
                 time.sleep(self.delay / 4)
         payload = dict(MOCK_BUILD)
         payload["written"] = written
+        payload["cleared"] = cleared
         payload["bytes"] = written * per_sample
         payload["out_dir"] = out.name
         on_line(f"[mock] 已写出 {written} 个校准样本到 {out.name}/")

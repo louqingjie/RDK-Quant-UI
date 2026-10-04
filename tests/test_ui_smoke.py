@@ -1698,6 +1698,49 @@ def test_staging_skips_when_the_source_is_already_inside(shell, qapp):
     assert (inside / "a.jpg").exists(), "更不该把自己清掉"
 
 
+def test_calib_build_reports_cleared_and_catches_a_leftover_mismatch(shell, qapp):
+    """产物目录里有残留时必须**报警**，而不是只报"写了几个"。
+
+    这是宿主侧 `_stage()` 那个 bug 的产物版本：文件名是 `<源文件主干>.bin`，
+    不清的话上一次多出来的会原样留着 —— 目录里是上一次的张数，
+    而界面显示的是这一次的。用户以为在用 50 张，实际第 4 步读到 380 张。
+    """
+    page = _calib_page(shell)
+    out = Path(page.workspace) / "calib_bin_f32"
+    out.mkdir(parents=True, exist_ok=True)
+    # 目录里留着 5 个，但回包说这次只写了 2 个 —— 正是残留的样子
+    for index in range(5):
+        (out / f"{index:04d}.bin").write_bytes(b"x")
+
+    page._on_built({
+        "ok": True, "written": 2, "cleared": 3, "bytes": 200,
+        "bytes_per_sample": 100, "out_dir": "calib_bin_f32", "dtype": "float32",
+    })
+
+    codes = [f.code for f in page._findings]
+    assert "CALIB_BUILT_COUNT_MISMATCH" in codes, codes
+    mismatch = next(f for f in page._findings if f.code == "CALIB_BUILT_COUNT_MISMATCH")
+    assert "5" in mismatch.message and "2" in mismatch.message
+
+    # 清掉几个旧产物**要说出来** —— 那是一次删除
+    assert "清掉了" in page.log.text_all() and "3 个" in page.log.text_all()
+
+
+def test_calib_build_is_quiet_when_the_directory_matches(shell, qapp):
+    """对得上时不该报残留 —— 否则每次生成都挂一条假告警。"""
+    page = _calib_page(shell)
+    out = Path(page.workspace) / "calib_bin_f32"
+    out.mkdir(parents=True, exist_ok=True)
+    for index in range(2):
+        (out / f"{index:04d}.bin").write_bytes(b"x")
+
+    page._on_built({
+        "ok": True, "written": 2, "cleared": 0, "bytes": 200,
+        "bytes_per_sample": 100, "out_dir": "calib_bin_f32", "dtype": "float32",
+    })
+    assert "CALIB_BUILT_COUNT_MISMATCH" not in [f.code for f in page._findings]
+
+
 def _write_gradient_images(source: Path, count: int, *, solid: bool = False,
                            side: int = 400) -> list[str]:
     """造一批**彼此可区分**的图 —— 分层抽样和去重都要有东西可分。

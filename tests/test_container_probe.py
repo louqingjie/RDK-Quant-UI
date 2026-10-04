@@ -43,6 +43,56 @@ def test_probe_exists():
     assert PROBE.is_file(), f"找不到探针：{PROBE}"
 
 
+def _probe_module():
+    """把探针当**模块**导入。
+
+    探针是独立脚本、没有包依赖，所以能直接加载。绝大多数用例走子进程
+    （那才是它的真实运行方式），但有些函数在宿主机上根本跑不到 ——
+    比如 `clear_output_dir`，它在 `calib-build` 里被调用，而那条路径在
+    宿主机上会因为 `detect_imaging()` 返回 None 提前退出。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("rdkquant_probe_under_test", PROBE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_clear_output_dir_removes_files_and_reports_them(tmp_path):
+    """**回归**：产物目录必须先清空。
+
+    文件名是 `<源文件主干>.bin`，所以上一次的 `0002.bin` 会被这一次覆盖，
+    而**上一次有、这一次没选的**原样留着 —— 目录里仍然是上一次的张数，
+    而界面上显示的是这一次的。用户以为在用 50 张，实际是 380 张。
+
+    实测在宿主侧 `_stage()` 踩过同一个坑：选 50 张，日志说"收进 50 张"，
+    紧接着扫出 3504 张。
+    """
+    probe = _probe_module()
+    for index in range(7):
+        (tmp_path / f"{index:04d}.bin").write_bytes(b"stale")
+    keep = tmp_path / "sub"
+    keep.mkdir()
+    (keep / "inner.bin").write_bytes(b"x")
+
+    assert probe.clear_output_dir(tmp_path) == 7, "删了几个要如实报出来"
+    assert [p.name for p in tmp_path.iterdir()] == ["sub"], "子目录不该被动"
+    assert (keep / "inner.bin").exists()
+
+
+def test_clear_output_dir_on_missing_dir_is_a_noop(tmp_path):
+    probe = _probe_module()
+    assert probe.clear_output_dir(tmp_path / "nope") == 0
+
+
+def test_build_payload_declares_the_cleared_count():
+    """回包里必须有 `cleared` —— 那是一次删除，不能不报。"""
+    probe = _probe_module()
+    source = Path(probe.__file__).read_text(encoding="utf-8")
+    assert '"cleared": cleared' in source
+
+
 def test_probe_is_ascii_safe():
     """JSON 契约是纯 ASCII —— 任何编码环境下都不可能损坏。"""
     result = subprocess.run(

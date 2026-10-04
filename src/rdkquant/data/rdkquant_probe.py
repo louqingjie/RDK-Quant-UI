@@ -737,6 +737,30 @@ def _image_files(directory):
     )
 
 
+def clear_output_dir(path):
+    """清空目录里的**文件**，返回删掉的个数。子目录不动（产物都是文件）。
+
+    抽成独立函数有两个原因：
+
+    * 它要在 `calib-build` 里被调用，而那条路径在宿主机上跑不起来
+      （`detect_imaging()` 返回 None）—— 抽出来才能在 host 上测
+    * "先清空产物目录"这件事和 S4 的 `clear_output()` 是同一条规矩，
+      独立出来便于对照
+    """
+    removed = 0
+    if not os.path.isdir(path):
+        return removed
+    for name in os.listdir(path):
+        target = os.path.join(path, name)
+        if os.path.isfile(target):
+            try:
+                os.remove(target)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def cmd_calib_build(argv):
     """用法: calib-build <src> <out> --shape WxH --layout NHWC|NCHW
              --color rgb|bgr|gray --dtype uint8|float32
@@ -794,6 +818,16 @@ def cmd_calib_build(argv):
     if not os.path.isdir(out):
         os.makedirs(out)
 
+    # ⚠️ **先把输出目录清空**（放在输入校验**之后**：校验没过就不该毁掉上一次的产物）。
+    #
+    # 文件名是 `<源文件主干>.bin`，所以上一次的 `0002.bin` 会被这一次覆盖，
+    # 而**上一次有、这一次没选的**那些原样留着 —— 目录里仍然是上一次的张数，
+    # 而界面上显示的是这一次的。用户会以为自己在用 50 张，实际是 380 张。
+    #
+    # 实测踩过同一个坑（宿主侧 `_stage()`）：选了 50 张，日志说"收进 50 张"，
+    # 紧接着扫出 3504 张。S4 那边 `clear_output()` 也是为这件事加的。
+    cleared = clear_output_dir(out)
+
     written = 0
     total_bytes = 0
     failures = []
@@ -833,6 +867,9 @@ def cmd_calib_build(argv):
         "ok": written > 0,
         "backend": backend,
         "written": written,
+        # 生成前清掉了几个旧产物。**必须报** —— 那是一次删除，
+        # 静默删掉上次的 380 个文件而用户只看到"已生成 50 个"是不诚实的。
+        "cleared": cleared,
         "failed": len(failures),
         "failures": failures[:10],
         "bytes": total_bytes,
