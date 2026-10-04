@@ -55,6 +55,17 @@ SLOW_THRESHOLD = 50
 #: 宁可漏掉边缘样本，也不要误伤正常图 —— 误排除会悄悄缩小校准集。
 SOLID_SPREAD = 6.0
 
+#: 短边低于它就剔除。
+#:
+#: 理由：校准数据最终要被缩放到模型输入尺寸（常见 640×640）。一张 52×49 的图
+#: 拉上去是 12 倍放大，得到的只是一团糊 —— 它既不代表真实分布，又会把校准统计
+#: 带偏。参考实现（`RDK-BPU/scripts/prepare_calibration_data.py`）同样有这条，
+#: 默认值也是 360。
+#:
+#: 在本项目那份 3504 张的数据集上实测：短边中位数 384，取 360 保留 **69.3%** ——
+#: 不激进。阈值是**数据集相关**的，所以它是参数；这里只是一个起点。
+MIN_SIDE = 360
+
 #: 亮度分桶与**相对权重**（0~255）。
 #:
 #: 直接照搬 `RDK-BPU/scripts/prepare_calibration_data.py` 的分桶比例 ——
@@ -90,6 +101,16 @@ class Candidate:
     def is_solid(self) -> bool:
         return self.spread < SOLID_SPREAD
 
+    @property
+    def min_side(self) -> int:
+        """短边。宽高有一个是 0（没量到）时返回 0 —— 那会被判为过小。"""
+        if self.width <= 0 or self.height <= 0:
+            return 0
+        return min(self.width, self.height)
+
+    def is_small(self, min_side: int = MIN_SIDE) -> bool:
+        return self.min_side < min_side
+
 
 @dataclass(frozen=True)
 class BucketReport:
@@ -106,6 +127,7 @@ class PickResult:
     buckets: tuple[BucketReport, ...]
     dropped_solid: tuple[str, ...]
     dropped_duplicate: tuple[str, ...]
+    dropped_small: tuple[str, ...]
     findings: tuple[Finding, ...]
 
     @property
@@ -169,12 +191,14 @@ def pick(
     count: int = TARGET,
     *,
     buckets: Sequence[tuple[int, int, int]] = BUCKETS,
+    min_side: int = MIN_SIDE,
 ) -> PickResult:
     """按官方口径挑校准集。
 
-    顺序：**去重 → 剔纯色 → 按亮度分桶分层抽样**。
+    顺序：**去重 → 剔小图 → 剔纯色 → 按亮度分桶分层抽样**。
 
-    去重放在纯色之前：重复帧往往就是同一张图，先去掉能让后面的桶统计少受干扰。
+    去重放在最前：重复帧往往就是同一张图，先去掉能让后面的桶统计少受干扰。
+    小图放在纯色之前：尺寸是可硬判的事实，先按它筛一道最省事。
 
     某个桶不够时，缺额会**转给还有余量的桶**（按权重从大到小），
     尽量凑到目标张数 —— 而不是像参考脚本那样静默少给几张。
@@ -193,10 +217,13 @@ def pick(
             seen.add(item.fingerprint)
         unique.append(item)
 
-    # ---- 2) 剔纯色 ----
-    solid = [c for c in unique if c.is_solid]
-    usable = [c for c in unique if not c.is_solid]
-    dropped_solid = [c.name for c in solid]
+    # ---- 2) 剔小图 ----
+    dropped_small = [c.name for c in unique if c.is_small(min_side)]
+    sized = [c for c in unique if not c.is_small(min_side)]
+
+    # ---- 3) 剔纯色 ----
+    dropped_solid = [c.name for c in sized if c.is_solid]
+    usable = [c for c in sized if not c.is_solid]
 
     # ---- 3) 分桶 ----
     plan = quotas(count, buckets)
@@ -237,6 +264,13 @@ def pick(
         for index, (low, high, _weight) in enumerate(buckets)
     )
 
+    if dropped_small:
+        findings.append(Finding(
+            LEVEL_WARN, "PICK_DROPPED_SMALL",
+            f"剔除了 {len(dropped_small)} 张短边 < {min_side} 的小图",
+            "小图拉到模型输入尺寸只会变糊，不代表真实分布。"
+            "例：" + "、".join(dropped_small[:5]),
+        ))
     if dropped_solid:
         findings.append(Finding(
             LEVEL_WARN, "PICK_DROPPED_SOLID",
@@ -273,6 +307,7 @@ def pick(
         buckets=reports,
         dropped_solid=tuple(dropped_solid),
         dropped_duplicate=tuple(dropped_dup),
+        dropped_small=tuple(dropped_small),
         findings=tuple(findings),
     )
 

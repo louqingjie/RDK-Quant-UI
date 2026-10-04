@@ -1640,21 +1640,38 @@ def _calib_page(shell):
     return shell.stage_pages[2]
 
 
-def _write_gradient_images(source: Path, count: int, *, solid: bool = False) -> list[str]:
-    """造一批**亮度各不相同**的图 —— 分层抽样要有东西可分。"""
-    from PySide6.QtGui import QColor, QImage
+def _write_gradient_images(source: Path, count: int, *, solid: bool = False,
+                           side: int = 400) -> list[str]:
+    """造一批**彼此可区分**的图 —— 分层抽样和去重都要有东西可分。
+
+    两条踩过的坑，都写在注释里免得下次再犯：
+
+    * **尺寸必须大于 `calibpick.MIN_SIDE`（360）**。造 64×64 的话全被判成
+      "短边过小"剔掉，挑选结果为空，测试以"没勾上任何一张"的形式失败 ——
+      看起来像产品坏了。
+    * **纹理必须是大尺度的**。aHash 在 **32×32 缩略**上算，细网格会被缩略
+      整个抹平 —— 12 张"图案位置不同"的图指纹完全一样，全被当重复帧剔掉。
+      所以这里用一条**粗亮条**（宽度 `side/8`），位置逐张不同。
+    """
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QColor, QImage, QPainter
 
     source.mkdir(parents=True, exist_ok=True)
     names = []
     for index in range(count):
         level = 8 + int(index * 240 / max(1, count - 1))
-        image = QImage(64, 64, QImage.Format.Format_RGB32)
-        # 一半纯色（离散度≈0，官方点名的"纯色图片"），一半带纹理
+        image = QImage(side, side, QImage.Format.Format_RGB32)
         image.fill(QColor(level, level, level))
-        if not solid and index % 2 == 1:
-            for y in range(0, 64, 4):
-                for x in range(0, 64, 4):
-                    image.setPixelColor(x, y, QColor(255 - level, 255 - level, 255 - level))
+        # 每 6 张留一张纯色 —— 离散度≈0，正是官方点名的"纯色图片"，该被剔掉
+        if not solid and index % 6 != 0:
+            bar = max(4, side // 8)
+            pos = (index * 37) % max(1, side - bar)
+            bright = min(255, level + 100)
+            # ⚠️ `QImage.fill()` 在 PySide6 里**没有带 rect 的重载**
+            # （`takes exactly one argument`）—— 画矩形要用 QPainter
+            painter = QPainter(image)
+            painter.fillRect(QRect(0, pos, side, bar), QColor(bright, bright, bright))
+            painter.end()
         name = f"{index:04d}.jpg"
         assert image.save(str(source / name), "JPEG")
         names.append(name)
@@ -1711,7 +1728,9 @@ def test_calib_auto_picked_maps_source_names_onto_grid_stems(shell, qapp, tmp_pa
     page.grid.set_images(tmp_path / "thumbs", names=thumb_names)
     assert page.grid.all_names(), "网格没装上 —— 缩略图目录得是真实存在的"
 
-    candidates = [Candidate(name=f"{stem}.jpg", brightness=20.0 + i * 15, spread=60.0)
+    # 尺寸要给够 —— 短边 < MIN_SIDE 的会被尺寸过滤剔掉（见那个测试）
+    candidates = [Candidate(name=f"{stem}.jpg", brightness=20.0 + i * 15, spread=60.0,
+                            width=1280, height=720)
                   for i, stem in enumerate(stems)]
     result = pick(candidates, count=6)
     page._on_auto_picked(result)
@@ -1737,7 +1756,13 @@ def test_calib_auto_pick_runs_end_to_end(shell, qapp, tmp_path: Path):
     page.grid.set_images(tmp_path / "thumbs2", names=thumb_names)
     assert page.grid.all_names()
 
-    page._on_auto_pick()
+    # ⚠️ 外壳刚建起来时，环境页的**自动远程探测**可能还占着全局单飞协调器，
+    # 那时 `start()` 会**静默拒绝**（只在日志里说一句），任务根本不起 ——
+    # 表现为 30 秒超时，看起来像挑选坏了。所以先等它收尾。
+    assert _wait_for(lambda: not shell.env_page.tasks.busy, qapp, timeout=10.0), \
+        "环境页的自动探测没收尾，全局单飞会拒绝起新任务"
+    assert page._on_auto_pick() is True, "挑选任务没起来 —— 看日志里那行「[提示]」"
+
     assert _wait_for(
         lambda: 0 < len(page.grid.checked_names()) < len(page.grid.all_names()),
         qapp, timeout=30.0,

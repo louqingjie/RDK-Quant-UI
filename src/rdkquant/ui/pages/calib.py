@@ -508,8 +508,8 @@ class CalibPage(StagePage):
             f"{' 等' if len(bad) > 3 else ''}（未解码的不在检查范围内）"
         )
 
-    def _on_auto_pick(self) -> None:
-        """按官方口径自动挑选校准集。
+    def _on_auto_pick(self) -> bool:
+        """按官方口径自动挑选校准集。**返回任务有没有真的起来。**
 
         **为什么值得做。** 官方（X5 手册 6.3.3）要求 20~100 张、来自训练/验证集、
         **不要异常样本（纯色图片、不含目标的图片）**；社区口径是 >50 张校准会明显变慢。
@@ -524,7 +524,7 @@ class CalibPage(StagePage):
         """
         if not self._displayed:
             self.log.append_line("[挑选] 请先扫描并刷新预览。")
-            return
+            return False
         source = Path(self.directory)
         names = list(self._displayed)
 
@@ -546,6 +546,7 @@ class CalibPage(StagePage):
             return result
 
         self.start(job, self._on_auto_picked, label="挑选")
+        return True
 
     def _on_auto_picked(self, result) -> None:
         """把挑选结果落到网格的勾选状态上。
@@ -566,6 +567,12 @@ class CalibPage(StagePage):
             self.log.append_line(
                 f"[挑选] 剔除 {len(result.dropped_solid)} 张近纯色图："
                 + "、".join(result.dropped_solid[:5])
+            )
+        if result.dropped_small:
+            self.log.append_line(
+                f"[挑选] 剔除 {len(result.dropped_small)} 张短边过小的图："
+                + "、".join(result.dropped_small[:5])
+                + "（小图拉到模型输入尺寸只会变糊）"
             )
         if result.dropped_duplicate:
             self.log.append_line(

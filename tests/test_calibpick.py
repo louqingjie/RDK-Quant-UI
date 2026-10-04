@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from rdkquant.core.calibpick import (
     BUCKETS,
+    MIN_SIDE,
     SLOW_THRESHOLD,
     SOLID_SPREAD,
     TARGET,
@@ -22,6 +23,9 @@ from rdkquant.core.calibpick import (
 
 
 def make(name: str, brightness: float, spread: float = 60.0, **kwargs) -> Candidate:
+    # 默认给一个"够大"的尺寸 —— 尺寸过滤单测在下面，别让所有用例都踩到它
+    kwargs.setdefault("width", 1280)
+    kwargs.setdefault("height", 720)
     return Candidate(name=name, brightness=brightness, spread=spread, **kwargs)
 
 
@@ -105,6 +109,48 @@ def test_duplicates_are_dropped_by_fingerprint():
     result = pick(items, count=3)
     assert result.chosen == ("a.jpg", "c.jpg")
     assert result.dropped_duplicate == ("b.jpg",)
+
+
+def test_small_images_are_dropped():
+    """短边过小的图要剔除 —— 拉到模型输入尺寸只会变糊。
+
+    参考实现（`RDK-BPU/scripts/prepare_calibration_data.py`）同样有这条。
+    实测本项目那份数据集：短边中位数 384，取 360 保留 69.3%。
+    """
+    items = [
+        make("tiny.jpg", 100.0, width=52, height=49),
+        make("big.jpg", 100.0, width=1920, height=1080),
+        make("square.jpg", 100.0, width=640, height=640),
+    ]
+    result = pick(items, count=3)
+    assert "tiny.jpg" not in result.chosen
+    assert result.dropped_small == ("tiny.jpg",)
+    assert set(result.chosen) == {"big.jpg", "square.jpg"}
+    finding = next(f for f in result.findings if f.code == "PICK_DROPPED_SMALL")
+    assert str(MIN_SIDE) in finding.message
+
+
+def test_min_side_is_exactly_the_boundary():
+    """刚好等于阈值的要留下 —— 边界写成 `<` 还是 `<=` 差一张图。"""
+    items = [make("edge.jpg", 100.0, width=MIN_SIDE, height=MIN_SIDE),
+             make("under.jpg", 100.0, width=MIN_SIDE - 1, height=900)]
+    result = pick(items, count=2)
+    assert result.chosen == ("edge.jpg",)
+    assert result.dropped_small == ("under.jpg",)
+
+
+def test_min_side_is_configurable():
+    items = [make("m.jpg", 100.0, width=200, height=200)]
+    assert pick(items, count=1).dropped_small == ("m.jpg",)
+    assert pick(items, count=1, min_side=100).dropped_small == ()
+
+
+def test_unmeasured_size_counts_as_too_small():
+    """宽高没读出来（0）的，不能蒙混过关 —— 它无法被校验。"""
+    item = Candidate(name="x.jpg", brightness=100.0, spread=60.0)
+    assert item.min_side == 0
+    assert item.is_small()
+    assert pick([item], count=1).dropped_small == ("x.jpg",)
 
 
 def test_missing_fingerprint_never_dedupes():

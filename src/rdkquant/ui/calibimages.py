@@ -214,7 +214,16 @@ MEASURE_SIZE = 32
 
 
 def _luma_and_hash(image: QImage, size: int) -> tuple[list[int], str] | None:
-    """缩放 → 灰度 → 返回 (亮度列表, aHash 指纹)。"""
+    """缩放 → 灰度 → 返回 (亮度列表, aHash 指纹)。
+
+    aHash 是**真正的 8×8 空间分块哈希**：把图切成 8×8 共 64 格，每格取均值，
+    再逐格和总均值比大小。
+
+    ⚠️ 第一版不是这么写的 —— 它把**扁平的亮度列表**切成 64 段取均值，
+    那等于 64 条**横带**，横向分布整个丢掉。后果实测过：24 张纹理位置相同、
+    但内容不同的图，指纹**完全一样**，被当作重复帧剔掉 14 张。
+    而 docstring 当时还写着"和参考实现一致" —— 那是假的。
+    """
     small = _scaled(image, size).convertToFormat(QImage.Format.Format_RGB888)
     width, height = small.width(), small.height()
     if width <= 0 or height <= 0:
@@ -229,19 +238,34 @@ def _luma_and_hash(image: QImage, size: int) -> tuple[list[int], str] | None:
             at = row + x * 3
             luma.append((raw[at] * 299 + raw[at + 1] * 587 + raw[at + 2] * 114) // 1000)
 
-    # aHash：8×8 灰度块，逐个和均值比。和参考实现（RDK-BPU 的
-    # `prepare_calibration_data.py`）一致 —— 那里也是直接比均值取布尔串。
-    fingerprint = ""
-    if len(luma) >= 64:
-        side = 8
-        step = len(luma) // (side * side)
-        block = [sum(luma[i * step:(i + 1) * step]) / step
-                 for i in range(side * side)] if step else []
-        if block:
-            average = sum(block) / len(block)
-            bits = "".join("1" if value > average else "0" for value in block)
-            fingerprint = f"{int(bits, 2):016x}"
-    return luma, fingerprint
+    return luma, _ahash(luma, width, height)
+
+
+def _ahash(luma: list[int], width: int, height: int, side: int = 8) -> str:
+    """8×8 均值哈希 → 16 位十六进制字符串。
+
+    每格用**整数边界**切（`bx * width // side`），所以任意尺寸都不会漏格、
+    也不会越界 —— 缩略图是"只缩不放"，小图会比 32×32 还小。
+    """
+    cells: list[float] = []
+    for by in range(side):
+        y0 = by * height // side
+        y1 = max(y0 + 1, (by + 1) * height // side)
+        for bx in range(side):
+            x0 = bx * width // side
+            x1 = max(x0 + 1, (bx + 1) * width // side)
+            total = 0
+            count = 0
+            for y in range(y0, min(y1, height)):
+                row = y * width
+                for x in range(x0, min(x1, width)):
+                    total += luma[row + x]
+                    count += 1
+            cells.append(total / count if count else 0.0)
+
+    average = sum(cells) / len(cells)
+    bits = "".join("1" if value > average else "0" for value in cells)
+    return f"{int(bits, 2):016x}"
 
 
 def measure_candidates(
